@@ -7,7 +7,9 @@
 //! For users without an enrolled fingerprint the broker asks this agent to confirm presence
 //! (`PresenceRequested`, AD-022); the agent shows an Allow/Deny notification and answers
 //! with `ConfirmPresence` on the same connection that made the `Ctap` call.
-#![allow(clippy::print_stderr)]
+#![allow(clippy::print_stderr, clippy::print_stdout)]
+
+mod prompt;
 
 use std::process::ExitCode;
 use std::sync::mpsc as std_mpsc;
@@ -26,8 +28,21 @@ use zbus::{Connection, MatchRule, MessageStream};
 const BUS_NAME: &str = "io.github.dangerousplay.PasskeyTpm1";
 const OBJECT_PATH: &str = "/io/github/dangerousplay/PasskeyTpm1";
 const TICK: Duration = Duration::from_millis(100);
-/// Generous bound on a broker call: the broker's fingerprint timeout is 30 s.
-const BROKER_TIMEOUT: Duration = Duration::from_secs(45);
+/// Default broker fingerprint window; the broker accepts the same
+/// `PASSKEY_UV_TIMEOUT_SECS` override.
+const DEFAULT_UV_TIMEOUT_SECS: u64 = 60;
+/// Extra time on top of the broker's window so the broker reports the real
+/// timeout/blocked status instead of the agent racing it.
+const BROKER_HEADROOM_SECS: u64 = 15;
+
+fn broker_timeout() -> Duration {
+    let uv = std::env::var("PASSKEY_UV_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(DEFAULT_UV_TIMEOUT_SECS);
+    Duration::from_secs(uv.saturating_add(BROKER_HEADROOM_SECS))
+}
 const STATUS_OTHER: u8 = 0x7F;
 /// Re-check of the seat state in case a logind signal was missed.
 const SEAT_POLL: Duration = Duration::from_secs(2);
@@ -267,12 +282,33 @@ fn open_device(
     Ok(writer)
 }
 
+/// Asks for a fingerprint through the selected backend. Native/polkit are not built yet, so
+/// they fall back to the notification rather than leaving the user without a prompt.
+fn prompt_user(backend: prompt::Backend, rp: String, notes: &std_mpsc::Sender<Note>) {
+    match backend {
+        prompt::Backend::Terminal => {
+            eprintln!("Touch the fingerprint reader to continue with {rp}");
+        }
+        prompt::Backend::Notification => {
+            let _ = notes.send(Note::Fingerprint(rp));
+        }
+        prompt::Backend::Native | prompt::Backend::Polkit => {
+            eprintln!(
+                "{} prompt backend is not built yet; using a notification",
+                backend.as_str()
+            );
+            let _ = notes.send(Note::Fingerprint(rp));
+        }
+    }
+}
+
 fn apply(
     effects: Vec<Effect>,
     writer: Option<&UhidWriter>,
     bus: &Connection,
     tx: &mpsc::UnboundedSender<Input>,
     notes: &std_mpsc::Sender<Note>,
+    backend: prompt::Backend,
 ) {
     for effect in effects {
         match effect {
@@ -290,7 +326,7 @@ fn apply(
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let response =
-                        match tokio::time::timeout(BROKER_TIMEOUT, ctap(&bus, request)).await {
+                        match tokio::time::timeout(broker_timeout(), ctap(&bus, request)).await {
                             Ok(Ok(r)) => r,
                             Ok(Err(e)) => {
                                 eprintln!("broker call failed: {e}");
@@ -309,15 +345,34 @@ fn apply(
                     }
                 });
             }
-            Effect::Prompt(rp) => {
-                let _ = notes.send(Note::Fingerprint(rp));
-            }
+            Effect::Prompt(rp) => prompt_user(backend, rp, notes),
         }
     }
 }
 
+fn probe_prompt() -> ExitCode {
+    let detection = prompt::Detection::detect();
+    let backend = prompt::select(
+        std::env::var("PASSKEY_PROMPT").ok().as_deref(),
+        &detection,
+        detection.graphical(),
+    );
+    println!("{}", prompt::report(&detection, backend));
+    ExitCode::SUCCESS
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--probe-prompt") {
+        return probe_prompt();
+    }
+    let detection = prompt::Detection::detect();
+    let backend = prompt::select(
+        std::env::var("PASSKEY_PROMPT").ok().as_deref(),
+        &detection,
+        detection.graphical(),
+    );
+    eprintln!("{}", prompt::report(&detection, backend));
     let bus = match Connection::system().await {
         Ok(b) => b,
         Err(e) => {
@@ -352,9 +407,9 @@ async fn main() -> ExitCode {
         let link = if present { writer.as_ref() } else { None };
         tokio::select! {
             input = rx.recv() => match input {
-                Some(Input::Output(data)) if present => apply(hid.on_output(&data, now_ms()), link, &bus, &tx, &notes),
+                Some(Input::Output(data)) if present => apply(hid.on_output(&data, now_ms()), link, &bus, &tx, &notes, backend),
                 Some(Input::Output(_)) => {}
-                Some(Input::Reply(id, response)) => apply(hid.on_broker_reply(id, &response), link, &bus, &tx, &notes),
+                Some(Input::Reply(id, response)) => apply(hid.on_broker_reply(id, &response), link, &bus, &tx, &notes, backend),
                 Some(Input::Seat(true)) if !present => {
                     let result = match &writer {
                         Some(w) => w.recreate(&params),
@@ -372,7 +427,7 @@ async fn main() -> ExitCode {
                     }
                 }
                 Some(Input::Seat(false)) if present => {
-                    apply(hid.reset(), None, &bus, &tx, &notes);
+                    apply(hid.reset(), None, &bus, &tx, &notes, backend);
                     present = false;
                     if let Some(Err(e)) = writer.as_ref().map(UhidWriter::remove_device) {
                         // Can't guarantee the device is gone: stop, which closes the handle.
@@ -384,7 +439,7 @@ async fn main() -> ExitCode {
                 Some(Input::Seat(_)) => {}
                 Some(Input::DeviceGone) | None => return ExitCode::FAILURE,
             },
-            _ = tick.tick() => apply(hid.on_tick(now_ms()), link, &bus, &tx, &notes),
+            _ = tick.tick() => apply(hid.on_tick(now_ms()), link, &bus, &tx, &notes, backend),
             _ = tokio::signal::ctrl_c() => return ExitCode::SUCCESS,
         }
     }

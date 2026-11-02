@@ -38,6 +38,14 @@ const STATUS_INVALID_LENGTH: u8 = 0x03;
 const STATUS_OTHER: u8 = 0x7F;
 /// CTAP2_ERR_OPERATION_DENIED: the caller isn't the user at the seat.
 const STATUS_OPERATION_DENIED: u8 = 0x27;
+/// Fingerprint scans allowed for one WebAuthn request before reporting a mismatch.
+///
+/// A single `verify-no-match` used to end the request, which forced the browser to start a
+/// whole new WebAuthn operation after one badly placed finger. Retrying here keeps the same
+/// request (and browser deadline) alive.
+const MAX_UV_ATTEMPTS: u32 = 3;
+/// Pause between retryable mismatches so the reader can settle and the user can reposition.
+const UV_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 enum Job {
     Prepare {
@@ -243,6 +251,36 @@ impl Broker {
         }
     }
 
+    /// Runs up to [`MAX_UV_ATTEMPTS`] fingerprint scans within `verify_timeout`.
+    ///
+    /// Only a mismatch is retried: cancellation, timeout, reader errors and a match return
+    /// immediately. Cancellation also wins during the pause between attempts.
+    async fn verify_with_retries(&self, username: &str, cancel: &CancellationToken) -> UvResult {
+        let deadline = tokio::time::Instant::now() + self.verify_timeout;
+        for attempt in 1..=MAX_UV_ATTEMPTS {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return UvResult::TimedOut;
+            }
+            let result = fprintd::verify(&self.fprintd, username, remaining, cancel.clone()).await;
+            if result != UvResult::NoMatch || attempt == MAX_UV_ATTEMPTS {
+                return result;
+            }
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!("fingerprint mismatch; retrying ({attempt}/{MAX_UV_ATTEMPTS})");
+            }
+            let pause =
+                UV_RETRY_DELAY.min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return UvResult::Cancelled,
+                () = tokio::time::sleep(pause) => {}
+            }
+        }
+        UvResult::NoMatch
+    }
+
     /// Serves one request. `cancel` is registered before any await (HARD-12), so a Cancel
     /// that arrives while the session, fprintd or the TPM is still being asked is not lost.
     async fn run(
@@ -302,8 +340,7 @@ impl Broker {
             _ if cancel.is_cancelled() => UvOutcome::Cancelled,
             None => UvOutcome::Unavailable,
             Some(name) => {
-                let result =
-                    fprintd::verify(&self.fprintd, &name, self.verify_timeout, cancel).await;
+                let result = self.verify_with_retries(&name, &cancel).await;
                 match result {
                     // The only place evidence is created: a real fprintd match for this uid.
                     UvResult::Match => UvOutcome::Matched(UvEvidence::from_fprintd_match(uid)),

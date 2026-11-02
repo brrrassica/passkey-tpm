@@ -11,7 +11,19 @@ use passkey_tpm_uvd::{serve, Broker, Logind, NssUsers, TpmWorker};
 use tss_esapi::tcti_ldr::TctiNameConf;
 use tss_esapi::Context;
 
-const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default fingerprint window. A WebAuthn operation may legitimately take longer than the
+/// old 30 s while the user finds the reader or retries a scan, and a browser that gives up
+/// first produces a confusing failure. Override with `PASSKEY_UV_TIMEOUT_SECS`.
+const DEFAULT_VERIFY_TIMEOUT_SECS: u64 = 60;
+
+fn verify_timeout() -> Duration {
+    let secs = std::env::var("PASSKEY_UV_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(DEFAULT_VERIFY_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -60,7 +72,7 @@ async fn main() -> ExitCode {
         conn.clone(),
         Box::new(NssUsers),
         Box::new(Logind::new(conn.clone())),
-        VERIFY_TIMEOUT,
+        verify_timeout(),
     );
     if let Err(e) = serve(&conn, broker).await {
         eprintln!("cannot export the broker: {e}");
