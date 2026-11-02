@@ -1297,6 +1297,171 @@ fn same_user_and_rp_replaces_the_discoverable_credential() {
     assert_eq!(entries[0].credential_id, second);
 }
 
+/// The applied `credProtect` level from a makeCredential response, or `None` when the
+/// authenticator emitted no extension output. Assumes the mock's fixed public key.
+fn cred_protect_echo(resp: &Value) -> Option<u64> {
+    let auth_data = get(resp, 2).and_then(Value::as_bytes)?;
+    if auth_data[32] & 0x80 == 0 {
+        return None;
+    }
+    let id = cred_id_from_auth_data(auth_data);
+    let cose_len = cbor::encode(&super::common::cose_es256([0xaa; 32], [0xbb; 32])).len();
+    let ext = cbor::decode(&auth_data[55 + id.len() + cose_len..]).ok()?;
+    get_text(&ext, "credProtect").and_then(Value::as_uint)
+}
+
+/// CTAP 2.1 §6.1.3: the RP may request 1 or 2, but this authenticator upgrades every
+/// credential to level 3 and must report the level it actually applied, not the request.
+#[test]
+fn cred_protect_upgrades_every_requested_level_to_three() {
+    for level in 1..=3u64 {
+        let mut a = auth();
+        let ext = Value::Map(vec![
+            (text("credProtect"), Value::Uint(level)),
+            (text("enforceCredentialProtectionPolicy"), Value::Bool(true)),
+        ]);
+        let step = prep(
+            &mut a,
+            ALICE,
+            &req(cmd::MAKE_CREDENTIAL, mc_params(vec![(int(6), ext)])),
+        );
+        let resp = body(&touch(&mut a, ALICE, step));
+        assert_eq!(
+            cred_protect_echo(&resp),
+            Some(3),
+            "requested level {level} must report the applied level"
+        );
+        assert_eq!(a.tpm_mut().created, 1, "exactly one credential at level 3");
+    }
+}
+
+#[test]
+fn enforce_credential_protection_policy_needs_a_policy() {
+    let mut a = auth();
+    let ext = Value::Map(vec![(
+        text("enforceCredentialProtectionPolicy"),
+        Value::Bool(true),
+    )]);
+    assert_eq!(
+        done(prep(
+            &mut a,
+            ALICE,
+            &req(cmd::MAKE_CREDENTIAL, mc_params(vec![(int(6), ext)])),
+        )),
+        vec![status::INVALID_OPTION],
+        "enforce=true without credProtect names nothing to enforce"
+    );
+    assert_eq!(a.tpm_mut().created, 0);
+
+    // `false` may stand alone and is a no-op; `true` with a policy is honorable at level 3.
+    for enforce in [false, true] {
+        let mut a = auth();
+        let mut ext = vec![(
+            text("enforceCredentialProtectionPolicy"),
+            Value::Bool(enforce),
+        )];
+        if enforce {
+            ext.push((text("credProtect"), Value::Uint(1)));
+        }
+        let step = prep(
+            &mut a,
+            ALICE,
+            &req(
+                cmd::MAKE_CREDENTIAL,
+                mc_params(vec![(int(6), Value::Map(ext))]),
+            ),
+        );
+        let resp = body(&touch(&mut a, ALICE, step));
+        assert_eq!(
+            cred_protect_echo(&resp),
+            enforce.then_some(3),
+            "enforce={enforce}"
+        );
+    }
+}
+
+#[test]
+fn cred_protect_extension_types_and_levels_are_validated() {
+    for level in [0u64, 4] {
+        let mut a = auth();
+        let ext = Value::Map(vec![(text("credProtect"), Value::Uint(level))]);
+        assert_eq!(
+            done(prep(
+                &mut a,
+                ALICE,
+                &req(cmd::MAKE_CREDENTIAL, mc_params(vec![(int(6), ext)])),
+            )),
+            vec![status::INVALID_OPTION],
+            "credProtect {level} is out of range"
+        );
+    }
+    for ext in [
+        Value::Map(vec![(text("credProtect"), text("3"))]),
+        Value::Map(vec![
+            (text("credProtect"), Value::Uint(1)),
+            (text("enforceCredentialProtectionPolicy"), Value::Uint(1)),
+        ]),
+    ] {
+        let mut a = auth();
+        assert_eq!(
+            done(prep(
+                &mut a,
+                ALICE,
+                &req(cmd::MAKE_CREDENTIAL, mc_params(vec![(int(6), ext)])),
+            )),
+            vec![status::CBOR_UNEXPECTED_TYPE]
+        );
+    }
+}
+
+/// A credential created under `credProtect` can never be exercised with presence alone:
+/// without a fingerprint and without a PIN there is no UV, so there is no signature.
+#[test]
+fn cred_protect_credential_is_never_used_without_uv() {
+    let mut a = auth();
+    let ext = Value::Map(vec![
+        (text("credProtect"), Value::Uint(1)),
+        (text("enforceCredentialProtectionPolicy"), Value::Bool(true)),
+    ]);
+    let id = register(&mut a, vec![(int(6), ext)]);
+    let signed_before = a.tpm_mut().signed.len();
+    let ga = req(
+        cmd::GET_ASSERTION,
+        ga_params(Some(vec![descriptor(&id)]), vec![]),
+    );
+
+    // No reader and no PIN: UV is impossible, so the request is refused outright.
+    assert_eq!(
+        done(a.prepare(ALICE, NO_READER, &ga, 1_000)),
+        vec![status::NOT_ALLOWED]
+    );
+    // A silent probe never degrades into a presence-only signature either.
+    let silent = req(
+        cmd::GET_ASSERTION,
+        ga_params(
+            Some(vec![descriptor(&id)]),
+            vec![(int(5), Value::Map(vec![(text("up"), Value::Bool(false))]))],
+        ),
+    );
+    assert_eq!(
+        done(prep(&mut a, ALICE, &silent)),
+        vec![status::UNSUPPORTED_OPTION]
+    );
+    assert_eq!(
+        a.tpm_mut().signed.len(),
+        signed_before,
+        "nothing signed without UV"
+    );
+
+    // With a fingerprint the signature goes through the UV gate, never UP.
+    let step = prep(&mut a, ALICE, &ga);
+    body(&touch(&mut a, ALICE, step));
+    assert_eq!(
+        a.tpm_mut().signed.last().map(|signed| signed.1),
+        Some(GateKind::Uv)
+    );
+}
+
 #[test]
 fn hmac_secret_round_trip_and_cred_protect_echo() {
     let mut a = auth();

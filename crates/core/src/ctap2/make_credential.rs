@@ -79,7 +79,10 @@ impl<T: TpmOps> Authenticator<T> {
         let resident = option(&req, 7, "rk")? == Some(true);
         let rp_id_hash = RpIdHash(sha256(&[rp_id.as_bytes()]));
 
-        // Extensions: hmac-secret (bool) and credProtect (1..=3); others are ignored.
+        // Extensions: hmac-secret (bool), credProtect (1..=3), and credProtect's
+        // enforceCredentialProtectionPolicy flag; others are ignored. Every credential is
+        // created at level 3 (`APPLIED_CRED_PROTECT`), which is at least as strict as any
+        // request, so the enforcement flag is always honorable and changes no outcome.
         let mut hmac_secret = false;
         let mut cred_protect_requested = false;
         if let Some(ext) = get(&req, 6) {
@@ -93,6 +96,15 @@ impl<T: TpmOps> Authenticator<T> {
                     return Err(status::INVALID_OPTION);
                 }
                 cred_protect_requested = true;
+            }
+            // CTAP 2.1 §6.1.3: the enforcement flag may only accompany a policy. Asking to
+            // enforce nothing is invalid, not a reason to silently ignore the flag.
+            let enforce = match get_text(ext, "enforceCredentialProtectionPolicy") {
+                Some(v) => Some(v.as_bool().ok_or(status::CBOR_UNEXPECTED_TYPE)?),
+                None => None,
+            };
+            if enforce == Some(true) && !cred_protect_requested {
+                return Err(status::INVALID_OPTION);
             }
         }
 
