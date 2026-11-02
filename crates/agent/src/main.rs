@@ -282,9 +282,16 @@ fn open_device(
     Ok(writer)
 }
 
-/// Asks for a fingerprint through the selected backend. Native/polkit are not built yet, so
-/// they fall back to the notification rather than leaving the user without a prompt.
+/// Asks for a fingerprint through the selected backend.
+///
+/// The polkit backend is rendered by the broker's `CheckAuthorization` in the desktop
+/// agent; this process must stay quiet then, or the user sees the native card and a toast
+/// for the same request. Native (M4.3) is not built yet and falls back to the notification.
 fn prompt_user(backend: prompt::Backend, rp: String, notes: &std_mpsc::Sender<Note>) {
+    if passkey_tpm_uv::polkit::available() {
+        // The broker selected the desktop prompt; do not duplicate it.
+        return;
+    }
     match backend {
         prompt::Backend::Terminal => {
             eprintln!("Touch the fingerprint reader to continue with {rp}");
@@ -294,7 +301,7 @@ fn prompt_user(backend: prompt::Backend, rp: String, notes: &std_mpsc::Sender<No
         }
         prompt::Backend::Native | prompt::Backend::Polkit => {
             eprintln!(
-                "{} prompt backend is not built yet; using a notification",
+                "{} prompt backend is unavailable; using a notification",
                 backend.as_str()
             );
             let _ = notes.send(Note::Fingerprint(rp));

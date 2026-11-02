@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>passkey-tpm</vendor>
+  <!-- The broker asks polkit to authenticate the caller for each WebAuthn operation.
+       A desktop polkit agent (Omarchy's omarchy.polkit plugin) shows the prompt, and
+       /etc/pam.d/polkit-1 performs the check. When that stack contains pam_fprintd.so,
+       Omarchy renders its fingerprint card. This is the same mechanism its own
+       privileged actions use. -->
+  <action id="io.github.dangerousplay.PasskeyTpm1.verify">
+    <description>Use a passkey protected by passkey-tpm</description>
+    <message>Authentication is required to use your passkey</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <!-- No _keep default: every operation must authenticate again. -->
+      <allow_active>auth_self</allow_active>
+    </defaults>
+    <!-- The broker runs as the unprivileged `passkey-tpm` user, not root. polkit 127
+         only lets trusted callers (uid 0 or an action owner) call CheckAuthorization()
+         for another identity, so the broker must own the action to check its caller. -->
+    <annotate key="org.freedesktop.policykit.owner">unix-user:passkey-tpm</annotate>
+  </action>
+</policyconfig>

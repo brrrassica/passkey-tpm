@@ -106,6 +106,8 @@ async fn fixture_with(mock_fprintd: MockFprintd, sessions: Box<dyn SessionPolicy
         Box::new(AlwaysAlice),
         sessions,
         Duration::from_secs(5),
+        // The test bus has no polkit; keep the fprintd path deterministic.
+        passkey_tpm_uvd::PromptBackend::Fprintd,
     );
     serve(&broker_conn, broker).await.expect("serve broker");
     let client = bus.connect().await;

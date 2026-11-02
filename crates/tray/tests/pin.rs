@@ -47,6 +47,7 @@ async fn set_then_change_the_pin_through_the_broker() {
         Box::new(Alice),
         Box::new(AtSeat),
         Duration::from_secs(5),
+        passkey_tpm_uvd::PromptBackend::Fprintd,
     );
     serve(&broker_conn, broker).await.unwrap();
     let client = bus.connect().await;

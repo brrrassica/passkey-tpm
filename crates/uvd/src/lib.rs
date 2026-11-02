@@ -2,10 +2,12 @@
 //!
 //! Callers reach it over the system bus. The calling user is taken from the bus
 //! (`GetConnectionUnixUser`), never from request data, and every operation is confined to
-//! that user's credentials. Fingerprint verification runs here, against fprintd, for that
-//! user only; a [`UvEvidence`] is created only from fprintd's `verify-match`. Requests are
-//! served only while the calling user has an active session on a local seat
-//! ([`passkey_tpm_uv::seat`]).
+//! that user's credentials. User verification runs here for that user only. When the
+//! installed polkit action and PAM stack support it, the broker asks polkit to
+//! authenticate the calling agent, which shows the desktop (Omarchy) fingerprint prompt;
+//! otherwise it drives fprintd directly. Either way a [`UvEvidence`] is created only from
+//! a successful check. Requests are served only while the calling user has an active
+//! session on a local seat ([`passkey_tpm_uv::seat`]).
 //!
 //! Users without an enrolled fingerprint confirm presence instead (AD-022): the broker
 //! sends a `PresenceRequested(id, prompt)` signal to the connection that made the `Ctap`
@@ -21,6 +23,7 @@ use passkey_tpm_core::ctaphid::MAX_MSG;
 use passkey_tpm_core::evidence::UvEvidence;
 use passkey_tpm_core::tpm_iface::{TpmOps, Uid};
 use passkey_tpm_uv::fprintd::{self, UvResult};
+use passkey_tpm_uv::polkit;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use zbus::message::Header;
@@ -168,6 +171,27 @@ impl UserLookup for NssUsers {
     }
 }
 
+/// How the broker asks the user for user verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptBackend {
+    /// polkit forwards the request to the desktop agent (Omarchy's fingerprint card).
+    Polkit,
+    /// The broker claims fprintd itself and the agent shows a notification.
+    Fprintd,
+}
+
+impl PromptBackend {
+    /// Picks the desktop prompt when the installed action and PAM stack support it.
+    #[must_use]
+    pub fn detect() -> Self {
+        if polkit::available() {
+            Self::Polkit
+        } else {
+            Self::Fprintd
+        }
+    }
+}
+
 /// A presence confirmation the broker is waiting for.
 struct PresenceWait {
     /// Unique bus name of the `Ctap` caller; only it may answer.
@@ -178,10 +202,12 @@ struct PresenceWait {
 /// The D-Bus service object.
 pub struct Broker {
     worker: TpmWorker,
-    fprintd: Connection,
+    /// System bus connection, shared by fprintd and polkit.
+    bus: Connection,
     users: Box<dyn UserLookup>,
     sessions: Box<dyn SessionPolicy>,
     verify_timeout: Duration,
+    prompt: PromptBackend,
     cancels: Arc<Mutex<HashMap<u32, (u64, CancellationToken)>>>,
     presence: Mutex<HashMap<u64, PresenceWait>>,
     next_request: std::sync::atomic::AtomicU64,
@@ -196,22 +222,24 @@ impl std::fmt::Debug for Broker {
 }
 
 impl Broker {
-    /// `fprintd` is the (system) bus connection used to reach fprintd; `sessions` decides
-    /// which users are at a seat (production: [`Logind`]).
+    /// `bus` is the (system) bus connection used to reach fprintd and polkit; `sessions`
+    /// decides which users are at a seat (production: [`Logind`]).
     #[must_use]
     pub fn new(
         worker: TpmWorker,
-        fprintd: Connection,
+        bus: Connection,
         users: Box<dyn UserLookup>,
         sessions: Box<dyn SessionPolicy>,
         verify_timeout: Duration,
+        prompt: PromptBackend,
     ) -> Self {
         Self {
             worker,
-            fprintd,
+            bus,
             users,
             sessions,
             verify_timeout,
+            prompt,
             cancels: Arc::default(),
             presence: Mutex::default(),
             next_request: std::sync::atomic::AtomicU64::new(0),
@@ -262,7 +290,7 @@ impl Broker {
             if remaining.is_zero() {
                 return UvResult::TimedOut;
             }
-            let result = fprintd::verify(&self.fprintd, username, remaining, cancel.clone()).await;
+            let result = fprintd::verify(&self.bus, username, remaining, cancel.clone()).await;
             if result != UvResult::NoMatch || attempt == MAX_UV_ATTEMPTS {
                 return result;
             }
@@ -304,7 +332,7 @@ impl Broker {
         }
         let username = self.users.username(uid);
         let uv_enrolled = match &username {
-            Some(name) => match fprintd::has_enrolled(&self.fprintd, name).await {
+            Some(name) => match fprintd::has_enrolled(&self.bus, name).await {
                 Ok(enrolled) => enrolled,
                 // fprintd can't be started or reached (no reader, not installed): logged so
                 // it isn't mistaken for "no fingerprints", but advertised as no built-in UV
@@ -339,10 +367,50 @@ impl Broker {
             // Cancelled before the prompt: don't claim the reader at all.
             _ if cancel.is_cancelled() => UvOutcome::Cancelled,
             None => UvOutcome::Unavailable,
-            Some(name) => {
-                let result = self.verify_with_retries(&name, &cancel).await;
+            Some(name) => self.verify(&name, uid, caller, &cancel).await,
+        };
+        self.worker
+            .complete(pending, outcome)
+            .await
+            .unwrap_or_else(|| vec![STATUS_OTHER])
+    }
+
+    /// Runs user verification for `uid`, using the configured prompt backend.
+    ///
+    /// polkit is fail-closed: once [`PromptBackend::Polkit`] is selected, a polkit or
+    /// desktop-agent failure is reported as unavailable instead of silently claiming
+    /// fprintd itself (which would bypass the visible prompt and could prompt twice).
+    async fn verify(
+        &self,
+        username: &str,
+        uid: u32,
+        caller: &Caller<'_>,
+        cancel: &CancellationToken,
+    ) -> UvOutcome {
+        match self.prompt {
+            PromptBackend::Polkit => {
+                match polkit::authorize(&self.bus, caller.name, self.verify_timeout, cancel).await {
+                    polkit::Outcome::Authorized => {
+                        // The only evidence created from the desktop prompt: polkit
+                        // authorized this caller for this request (PAM verified them).
+                        UvOutcome::Matched(UvEvidence::from_polkit_authorization(uid))
+                    }
+                    polkit::Outcome::Denied => UvOutcome::NoMatch,
+                    polkit::Outcome::Cancelled => UvOutcome::Cancelled,
+                    polkit::Outcome::TimedOut => UvOutcome::TimedOut,
+                    polkit::Outcome::Unavailable(e) => {
+                        #[allow(clippy::print_stderr)]
+                        {
+                            eprintln!("polkit prompt unavailable for uid={uid}: {e}");
+                        }
+                        UvOutcome::Unavailable
+                    }
+                }
+            }
+            PromptBackend::Fprintd => {
+                let result = self.verify_with_retries(username, cancel).await;
                 match result {
-                    // The only place evidence is created: a real fprintd match for this uid.
+                    // The only evidence created on this backend: a real fprintd match.
                     UvResult::Match => UvOutcome::Matched(UvEvidence::from_fprintd_match(uid)),
                     UvResult::NoMatch => UvOutcome::NoMatch,
                     UvResult::Cancelled => UvOutcome::Cancelled,
@@ -350,11 +418,7 @@ impl Broker {
                     UvResult::Unavailable(_) => UvOutcome::Unavailable,
                 }
             }
-        };
-        self.worker
-            .complete(pending, outcome)
-            .await
-            .unwrap_or_else(|| vec![STATUS_OTHER])
+        }
     }
 
     /// Asks the `Ctap` caller to confirm presence for `prompt` and waits for its answer,

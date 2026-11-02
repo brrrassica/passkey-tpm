@@ -1,10 +1,14 @@
 //! Prompt backend selection and Omarchy detection (0.2.0 M4.1/M4.2).
 //!
-//! The full-screen layer-shell overlay (M4.3) is not part of this foundation, but the
-//! selection logic is: [`Detection`] inspects the session, [`select`] honours
+//! The selection logic is: [`Detection`] inspects the session, [`select`] honours
 //! `PASSKEY_PROMPT=auto|native|polkit|notification|terminal`, and the agent uses the result
-//! to decide how to ask for a fingerprint. Detection is advisory: an unavailable native
-//! backend must fall through to a notification, never fail the passkey operation.
+//! to decide how to ask for a fingerprint. Detection is advisory: an unavailable backend
+//! must fall through to a notification, never fail the passkey operation.
+//!
+//! The polkit backend is driven by the broker, not by this agent: when the installed action
+//! and `/etc/pam.d/polkit-1` (with `pam_fprintd.so`) support it, the broker calls
+//! `CheckAuthorization` and the desktop agent shows the prompt. In that mode the agent adds
+//! no notification, so the user sees only the native card.
 
 use std::path::{Path, PathBuf};
 
@@ -36,6 +40,8 @@ impl Backend {
 /// Session facts collected once at agent start.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Detection {
+    /// The broker will use the installed polkit action + `pam_fprintd` desktop prompt.
+    pub polkit_prompt: bool,
     /// `omarchy` is on `PATH`.
     pub omarchy_command: bool,
     /// `OMARCHY_PATH` is set.
@@ -76,6 +82,7 @@ impl Detection {
         let wayland_by_type =
             std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v.eq_ignore_ascii_case("wayland"));
         Self {
+            polkit_prompt: passkey_tpm_uv::polkit::available(),
             omarchy_command: command_in_path("omarchy"),
             omarchy_path: non_empty_env("OMARCHY_PATH"),
             omarchy_data_dir: std::env::var_os("HOME")
@@ -110,7 +117,8 @@ impl Detection {
     fn summary(&self) -> String {
         let yes = |v: bool| if v { "yes" } else { "no" };
         format!(
-            "omarchy: cmd={} path={} data={} release={}; hyprland={} wayland={} hyprctl={}",
+            "polkit={}; omarchy: cmd={} path={} data={} release={}; hyprland={} wayland={} hyprctl={}",
+            yes(self.polkit_prompt),
             yes(self.omarchy_command),
             yes(self.omarchy_path),
             yes(self.omarchy_data_dir),
@@ -123,7 +131,10 @@ impl Detection {
 }
 
 fn automatic_backend(detection: &Detection, graphical: bool) -> Backend {
-    if detection.can_use_native() {
+    if detection.polkit_prompt && graphical {
+        // The broker shows the native desktop card; the agent stays quiet.
+        Backend::Polkit
+    } else if detection.can_use_native() {
         Backend::Native
     } else if graphical {
         Backend::Notification
@@ -134,13 +145,13 @@ fn automatic_backend(detection: &Detection, graphical: bool) -> Backend {
 
 /// Resolves `PASSKEY_PROMPT` against the detected session.
 ///
-/// An explicitly requested `native` backend that the session cannot support falls back the
-/// same way `auto` would, so a stale environment variable cannot break passkey operations.
+/// An explicitly requested backend that the session cannot support falls back the same way
+/// `auto` would, so a stale environment variable cannot break passkey operations.
 #[must_use]
 pub fn select(requested: Option<&str>, detection: &Detection, graphical: bool) -> Backend {
     match requested.unwrap_or("auto").to_ascii_lowercase().as_str() {
         "native" if detection.can_use_native() => Backend::Native,
-        "polkit" => Backend::Polkit,
+        "polkit" if detection.polkit_prompt && graphical => Backend::Polkit,
         "notification" => Backend::Notification,
         "terminal" => Backend::Terminal,
         _ => automatic_backend(detection, graphical),
@@ -151,8 +162,11 @@ pub fn select(requested: Option<&str>, detection: &Detection, graphical: bool) -
 #[must_use]
 pub fn report(detection: &Detection, backend: Backend) -> String {
     let note = match backend {
-        Backend::Native | Backend::Polkit => {
-            "\nnote: this backend is not built yet; the agent falls back to a notification"
+        Backend::Polkit => {
+            "\nnote: the broker shows the desktop authentication dialog; the agent adds no notification"
+        }
+        Backend::Native => {
+            "\nnote: the full-screen overlay is not built yet; the agent falls back to a notification"
         }
         Backend::Notification | Backend::Terminal => "",
     };
@@ -175,6 +189,26 @@ mod tests {
             wayland_session: wayland,
             ..Detection::default()
         }
+    }
+
+    fn polkit_detection(wayland: bool) -> Detection {
+        Detection {
+            polkit_prompt: true,
+            wayland_session: wayland,
+            ..Detection::default()
+        }
+    }
+
+    #[test]
+    fn auto_prefers_polkit_when_the_broker_can_prompt() {
+        let d = polkit_detection(true);
+        assert_eq!(select(None, &d, true), Backend::Polkit);
+    }
+
+    #[test]
+    fn auto_does_not_pick_polkit_without_a_graphical_session() {
+        let d = polkit_detection(false);
+        assert_eq!(select(None, &d, false), Backend::Terminal);
     }
 
     #[test]
@@ -203,15 +237,25 @@ mod tests {
     }
 
     #[test]
+    fn explicit_polkit_falls_back_when_unsupported() {
+        let d = detection(false, false, true);
+        assert_eq!(select(Some("polkit"), &d, true), Backend::Notification);
+    }
+
+    #[test]
     fn explicit_backends_are_honoured() {
         let d = detection(true, true, true);
-        assert_eq!(select(Some("polkit"), &d, true), Backend::Polkit);
+        assert_eq!(select(Some("polkit"), &d, true), Backend::Native);
         assert_eq!(
             select(Some("notification"), &d, true),
             Backend::Notification
         );
         assert_eq!(select(Some("terminal"), &d, true), Backend::Terminal);
         assert_eq!(select(Some("native"), &d, true), Backend::Native);
+        assert_eq!(
+            select(Some("polkit"), &polkit_detection(true), true),
+            Backend::Polkit
+        );
     }
 
     #[test]

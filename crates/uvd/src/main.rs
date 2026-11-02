@@ -7,7 +7,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use passkey_tpm_tpm::adapter::TpmBackend;
-use passkey_tpm_uvd::{serve, Broker, Logind, NssUsers, TpmWorker};
+use passkey_tpm_uvd::{serve, Broker, Logind, NssUsers, PromptBackend, TpmWorker};
 use tss_esapi::tcti_ldr::TctiNameConf;
 use tss_esapi::Context;
 
@@ -67,12 +67,15 @@ async fn main() -> ExitCode {
         }
     };
     let watchdog = worker.clone();
+    let prompt = PromptBackend::detect();
+    eprintln!("user-verification prompt: {prompt:?}");
     let broker = Broker::new(
         worker,
         conn.clone(),
         Box::new(NssUsers),
         Box::new(Logind::new(conn.clone())),
         verify_timeout(),
+        prompt,
     );
     if let Err(e) = serve(&conn, broker).await {
         eprintln!("cannot export the broker: {e}");

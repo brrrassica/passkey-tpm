@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod fprintd;
+pub mod polkit;
 pub mod seat;
 
 #[cfg(feature = "mock")]

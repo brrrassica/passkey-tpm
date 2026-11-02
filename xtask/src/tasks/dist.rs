@@ -67,6 +67,11 @@ pub const INSTALL: &[(&str, &str, u32)] = &[
         0o644,
     ),
     (
+        "packaging/polkit/io.github.dangerousplay.PasskeyTpm1.policy",
+        "{prefix}/share/polkit-1/actions/io.github.dangerousplay.PasskeyTpm1.policy",
+        0o644,
+    ),
+    (
         "packaging/udev/70-passkey-tpm-uhid.rules",
         "{prefix}/lib/udev/rules.d/70-passkey-tpm-uhid.rules",
         0o644,

@@ -1,8 +1,10 @@
 //! User-verification evidence and the authenticator-data flags it allows (MVP1-05).
 //!
-//! A [`UvEvidence`] value stands for "fprintd reported `verify-match` for this uid during
-//! this request". The broker creates one only after that happens, and the core consumes it
-//! to build authenticator data and to choose the TPM gate. Verus proves the UV flag is set
+//! A [`UvEvidence`] value stands for "the broker verified this uid during this request":
+//! either fprintd reported `verify-match`, or polkit authorized the caller through the
+//! desktop prompt (whose PAM stack performs the scan). The broker creates one only after
+//! that happens, and the core consumes it to build authenticator data and to choose the
+//! TPM gate. Verus proves the UV flag is set
 //! exactly when evidence is present, and that evidence always selects a UV gate, so the TPM
 //! policy and the flags in the signed data can't disagree.
 
@@ -23,6 +25,10 @@ pub const FLAG_ED: u8 = 0x80;
 pub enum UvMethod {
     /// fprintd reported `verify-match` in this request.
     Fingerprint,
+    /// polkit authorized the caller through the desktop prompt in this request. PAM
+    /// performed the check; Omarchy's agent uses the fingerprint reader when
+    /// `pam_fprintd.so` is in `/etc/pam.d/polkit-1`.
+    Polkit,
     /// A valid pinUvAuthParam on a token with `userVerified` (PIN or earlier fingerprint).
     PinUvAuthToken,
 }
@@ -46,6 +52,16 @@ impl UvEvidence {
             ev.spec_uid() == uid,
     {
         UvEvidence { uid, method: UvMethod::Fingerprint }
+    }
+
+    /// Call **only** after polkit authorized `uid` for the passkey action in this request.
+    /// The desktop PAM stack performed the verification (fingerprint, or its configured
+    /// password fallback). Deliberately not `Clone`: one authorization, one use.
+    pub fn from_polkit_authorization(uid: u32) -> (ev: Self)
+        ensures
+            ev.spec_uid() == uid,
+    {
+        UvEvidence { uid, method: UvMethod::Polkit }
     }
 
     /// Call **only** after verifying a pinUvAuthParam against a token issued to `uid` with
@@ -152,6 +168,10 @@ mod tests {
         let ad = auth_data(&[7; 32], &ev, None, Some(&[0xa0]));
         assert_eq!(ad[32], FLAG_UP | FLAG_UV | FLAG_ED);
         assert_eq!(UvEvidence::from_token(5).method(), UvMethod::PinUvAuthToken);
+        let polkit = UvEvidence::from_polkit_authorization(1000);
+        assert_eq!(polkit.method(), UvMethod::Polkit);
+        assert_eq!(polkit.uid(), 1000);
+        assert_eq!(polkit.gate(), GateKind::Uv);
         assert_eq!(ev.gate(), GateKind::Uv);
         assert_eq!(ev.uid(), 1000);
     }
