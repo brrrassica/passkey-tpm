@@ -1,8 +1,8 @@
 pkgbase = passkey-tpm
 	pkgdesc = TPM-backed passkeys (FIDO2/WebAuthn) for Linux, unlocked with fingerprint or PIN
-	pkgver = 0.1.0beta2
+	pkgver = 0.1.0brrr1
 	pkgrel = 1
-	url = https://github.com/dangerousplay/passkey-tpm
+	url = https://github.com/brrrassica/passkey-tpm
 	arch = x86_64
 	arch = aarch64
 	license = MIT OR Apache-2.0
@@ -15,7 +15,7 @@ pkgbase = passkey-tpm
 	depends = gcc-libs
 	depends = glibc
 	optdepends = libfido2: fido2-token diagnostics
-	source = passkey-tpm-0.1.0-beta.2.tar.gz::https://github.com/dangerousplay/passkey-tpm/archive/refs/tags/v0.1.0-beta.2.tar.gz
+	source = passkey-tpm-0.1.0-brrr1.tar.gz::https://github.com/brrrassica/passkey-tpm/archive/refs/tags/v0.1.0-brrr1.tar.gz
 	sha256sums = SKIP
 
 pkgname = passkey-tpm

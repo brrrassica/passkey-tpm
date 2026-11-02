@@ -1,3 +1,10 @@
+passkey-tpm (0.1.0~brrr1-1) unstable; urgency=medium
+
+  * Fork release: retries, configurable UV timeout, prompt backends,
+    getInfo advertisement audit, and the polkit fingerprint prompt.
+
+ -- Sam Ralial <sam@alatcerdas.tech>  Mon, 02 Nov 2026 00:00:00 +0000
+
 passkey-tpm (0.1.0~beta.2-1) unstable; urgency=medium
 
   * Second beta: tray icon, PIN + presence for users without a fingerprint.

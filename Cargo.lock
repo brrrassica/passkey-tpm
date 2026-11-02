@@ -966,7 +966,7 @@ checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
 
 [[package]]
 name = "passkey-tpm-agent"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 dependencies = [
  "futures-util",
  "getrandom 0.4.3",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "passkey-tpm-cli"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 dependencies = [
  "passkey-tpm-testkit",
  "passkey-tpm-tpm",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "passkey-tpm-core"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 dependencies = [
  "aes",
  "cbc",
@@ -1012,11 +1012,11 @@ dependencies = [
 
 [[package]]
 name = "passkey-tpm-provider-dbus"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 
 [[package]]
 name = "passkey-tpm-testkit"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 dependencies = [
  "tss-esapi",
  "zbus",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "passkey-tpm-tpm"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 dependencies = [
  "argon2",
  "getrandom 0.4.3",
@@ -1039,11 +1039,11 @@ dependencies = [
 
 [[package]]
 name = "passkey-tpm-transport-uhid"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 
 [[package]]
 name = "passkey-tpm-tray"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 dependencies = [
  "ksni",
  "notify-rust",
@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "passkey-tpm-uv"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 dependencies = [
  "futures-util",
  "serde",
@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "passkey-tpm-uvd"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 dependencies = [
  "futures-util",
  "nix",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "passkey-tpm-wire"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 dependencies = [
  "proptest",
  "zeroize",

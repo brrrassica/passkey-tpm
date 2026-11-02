@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn firmware_version_is_a_derived_encoding() {
-        assert_eq!(encode_firmware_version("0.1.0-beta.2"), 0x0000_0100);
+        assert_eq!(encode_firmware_version("0.1.0-brrr1"), 0x0000_0100);
         assert_eq!(encode_firmware_version("0.2.0"), 0x0000_0200);
         assert_eq!(encode_firmware_version("2.3.4"), 0x0002_0304);
         // Missing or junk fields degrade to 0 instead of panicking.

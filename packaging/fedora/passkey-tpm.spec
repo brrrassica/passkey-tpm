@@ -1,12 +1,12 @@
-%global upstream_version 0.1.0-beta.2
+%global upstream_version 0.1.0-brrr1
 
 Name:           passkey-tpm
 # "~" sorts the pre-release before the final 0.1.0.
-Version:        0.1.0~beta.2
+Version:        0.1.0~brrr1
 Release:        1%{?dist}
 Summary:        TPM-backed passkeys (FIDO2/WebAuthn) for Linux
 License:        MIT OR Apache-2.0
-URL:            https://github.com/dangerousplay/passkey-tpm
+URL:            https://github.com/brrrassica/passkey-tpm
 Source0:        %{url}/archive/v%{upstream_version}/%{name}-%{upstream_version}.tar.gz
 # COPR builds vendor crates (rust2rpm -V); a Fedora review would use system crates instead.
 Source1:        %{name}-%{upstream_version}-vendor.tar.xz

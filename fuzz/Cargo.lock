@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "passkey-tpm-core"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 dependencies = [
  "aes",
  "cbc",
@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "passkey-tpm-wire"
-version = "0.1.0-beta.2"
+version = "0.1.0-brrr1"
 dependencies = [
  "zeroize",
 ]

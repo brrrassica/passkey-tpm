@@ -1,11 +1,11 @@
 # Maintainer: Davi Henrique <dangerousplay715@gmail.com>
 pkgname=passkey-tpm
-pkgver=0.1.0beta2
-_tag=0.1.0-beta.2 # upstream version; pkgver drops the "-" Arch forbids
+pkgver=0.1.0brrr1
+_tag=0.1.0-brrr1 # upstream version; pkgver drops the "-" Arch forbids
 pkgrel=1
 pkgdesc="TPM-backed passkeys (FIDO2/WebAuthn) for Linux, unlocked with fingerprint or PIN"
 arch=('x86_64' 'aarch64')
-url="https://github.com/dangerousplay/passkey-tpm"
+url="https://github.com/brrrassica/passkey-tpm"
 license=('MIT OR Apache-2.0')
 depends=('tpm2-tss' 'fprintd' 'dbus' 'polkit' 'systemd' 'gcc-libs' 'glibc')
 makedepends=('cargo')
