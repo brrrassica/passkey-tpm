@@ -4,7 +4,10 @@ use passkey_tpm_wire::cbor::{self, Value};
 use passkey_tpm_wire::credid::KeyBlobs;
 use proptest::prelude::*;
 
-use super::common::{cmd, get, get_text, int, sha256, status, text, AAGUID, MAX_UV_RETRIES};
+use super::common::{
+    cmd, get, get_text, int, sha256, status, text, AAGUID, MAX_CREDENTIAL_COUNT_IN_LIST,
+    MAX_MSG_SIZE, MAX_UV_RETRIES,
+};
 use super::{Authenticator, Step, UserInfo, UvOutcome};
 use crate::evidence::UvEvidence;
 use crate::gates::GateKind;
@@ -446,6 +449,135 @@ fn get_info_advertises_ctap_2_1() {
         get_text(get(&info, 4).unwrap(), "clientPin"),
         Some(&Value::Bool(false)),
         "per user"
+    );
+}
+
+/// M3.1: the advertisement must match the implementation, and nothing unimplemented may be
+/// advertised. A wrong value here silently changes what every platform offers the user, so
+/// each member and option is pinned to the code that enforces it.
+#[test]
+fn get_info_advertisement_matches_implemented_features() {
+    let mut a = auth();
+    let info = body(&done(prep(&mut a, ALICE, &[cmd::GET_INFO])));
+
+    // Members a platform may act on.
+    for key in [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0D, 0x0E, 0x12, 0x14,
+    ] {
+        assert!(get(&info, key).is_some(), "missing member {key:#04x}");
+    }
+    // Features with no implementation must not be advertised.
+    for key in [0x0B, 0x0C, 0x0F, 0x10, 0x11, 0x13, 0x15] {
+        assert!(
+            get(&info, key).is_none(),
+            "member {key:#04x} must be absent"
+        );
+    }
+
+    assert_eq!(
+        get(&info, 1),
+        Some(&Value::Array(vec![text("FIDO_2_0"), text("FIDO_2_1")]))
+    );
+    assert_eq!(
+        get(&info, 2),
+        Some(&Value::Array(vec![
+            text("credProtect"),
+            text("hmac-secret")
+        ]))
+    );
+    assert_eq!(
+        get(&info, 5),
+        Some(&Value::Uint(MAX_MSG_SIZE)),
+        "maxMsgSize"
+    );
+    assert_eq!(
+        MAX_MSG_SIZE,
+        crate::ctaphid::MAX_MSG as u64,
+        "maxMsgSize must be the enforced HID limit"
+    );
+    assert_eq!(
+        get(&info, 6),
+        Some(&Value::Array(vec![Value::Uint(2), Value::Uint(1)])),
+        "both PIN/UV auth protocols are implemented"
+    );
+    assert_eq!(
+        get(&info, 7),
+        Some(&Value::Uint(MAX_CREDENTIAL_COUNT_IN_LIST as u64))
+    );
+    assert_eq!(
+        get(&info, 8),
+        Some(&Value::Uint(passkey_tpm_wire::credid::MAX_LEN as u64))
+    );
+    assert_eq!(get(&info, 9), Some(&Value::Array(vec![text("usb")])));
+    assert_eq!(get(&info, 0x0D), Some(&Value::Uint(4)), "minPINLength");
+    assert_eq!(
+        get(&info, 0x0E),
+        Some(&Value::Uint(super::info::firmware_version())),
+        "firmwareVersion follows the crate version"
+    );
+    assert_eq!(
+        get(&info, 0x12),
+        Some(&Value::Uint(0x02)),
+        "uvModality is fingerprint"
+    );
+    assert_eq!(get(&info, 0x14), Some(&Value::Uint(64)), "remaining rk");
+
+    // Options are capability flags, not current configuration.
+    let opts = get(&info, 4).unwrap();
+    for (name, value) in [
+        ("rk", true),
+        ("up", true),
+        ("uv", true),
+        ("plat", false),
+        ("credMgmt", true),
+        ("clientPin", false),
+        ("pinUvAuthToken", true),
+        ("makeCredUvNotRqd", false),
+    ] {
+        assert_eq!(get_text(opts, name), Some(&Value::Bool(value)), "{name}");
+    }
+    for name in [
+        "alwaysUv",
+        "authnrCfg",
+        "bioEnroll",
+        "largeBlobs",
+        "ep",
+        "noMcGaPermissionsWithClientPin",
+        "setMinPINLength",
+        "credentialMgmtPreview",
+        "userVerificationMgmtPreview",
+        "uvBioEnroll",
+        "uvAcfg",
+    ] {
+        assert_eq!(get_text(opts, name), None, "{name} must not be advertised");
+    }
+
+    // A missing finger keeps `uv` present and turns it false; a missing PIN does the same for
+    // `clientPin`. Both mean "capable, not configured" (CTAP 2.1 §6.4), not "unsupported".
+    let no_reader = body(&done(a.prepare(ALICE, NO_READER, &[cmd::GET_INFO], 1_000)));
+    let opts = get(&no_reader, 4).unwrap();
+    assert_eq!(get_text(opts, "uv"), Some(&Value::Bool(false)));
+    assert_eq!(get_text(opts, "clientPin"), Some(&Value::Bool(false)));
+
+    // The advertised boundary values are enforced, not decorative: a resident credential
+    // draws down `remainingDiscoverableCredentials`, and one ID over the advertised list
+    // limit is rejected.
+    let _ = register(
+        &mut a,
+        vec![(int(7), Value::Map(vec![(text("rk"), Value::Bool(true))]))],
+    );
+    let info = body(&done(prep(&mut a, ALICE, &[cmd::GET_INFO])));
+    assert_eq!(get(&info, 0x14), Some(&Value::Uint(63)));
+
+    let over_limit = u8::try_from(MAX_CREDENTIAL_COUNT_IN_LIST).unwrap();
+    let too_many: Vec<Value> = (0..=over_limit).map(|i| descriptor(&[i])).collect();
+    assert_eq!(
+        done(prep(
+            &mut a,
+            ALICE,
+            &req(cmd::GET_ASSERTION, ga_params(Some(too_many), vec![]))
+        )),
+        vec![status::LIMIT_EXCEEDED]
     );
 }
 

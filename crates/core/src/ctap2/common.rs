@@ -55,9 +55,15 @@ pub mod status {
 
 /// AAGUID: all zero (packed self-attestation identifies no model; no tracking ID).
 pub const AAGUID: [u8; 16] = [0; 16];
-pub const MAX_MSG_SIZE: u64 = 2048;
+/// Largest CTAP message the HID layer accepts, and the `maxMsgSize` we advertise (0x05).
+///
+/// Taken from [`crate::ctaphid::MAX_MSG`] so the promise and the enforced limit cannot drift.
+pub const MAX_MSG_SIZE: u64 = crate::ctaphid::MAX_MSG as u64;
+/// Maximum credential IDs accepted in one list, and `maxCredentialCountInList` (0x07).
 pub const MAX_CREDENTIAL_COUNT_IN_LIST: usize = 8;
-pub const MAX_CREDENTIAL_ID_LENGTH: u64 = 1023;
+/// WebAuthn L3 credential-ID cap, shared with the wire format; also `maxCredentialIdLength`
+/// (0x08).
+pub const MAX_CREDENTIAL_ID_LENGTH: u64 = passkey_tpm_wire::credid::MAX_LEN as u64;
 pub const MAX_RESIDENT: usize = 64;
 pub const MIN_PIN_LENGTH: usize = 4;
 /// COSE algorithm ES256.
