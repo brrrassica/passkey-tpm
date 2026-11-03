@@ -76,6 +76,12 @@ impl<T: TpmOps> Authenticator<T> {
         if option(&req, 7, "up")? == Some(false) {
             return Err(status::INVALID_OPTION);
         }
+        // WebAuthn `userVerification: required|preferred|discouraged` reaches CTAP as
+        // `uv: true|absent|false`. Every credential is created at credProtect level 3
+        // ([`APPLIED_CRED_PROTECT`]), so UV is always verified and `uv: false` cannot lower
+        // that — which CTAP 2.1 §6.1.2 permits. The option is still type-checked, so a
+        // non-boolean value is rejected like every other option.
+        let _ = option(&req, 7, "uv")?;
         let resident = option(&req, 7, "rk")? == Some(true);
         let rp_id_hash = RpIdHash(sha256(&[rp_id.as_bytes()]));
 

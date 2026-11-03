@@ -174,6 +174,11 @@ impl<T: TpmOps> Authenticator<T> {
                 return error(match pending.kind {
                     PendingKind::TokenUsingUv(_) if blocked => status::UV_BLOCKED,
                     PendingKind::TokenUsingUv(_) => status::UV_INVALID,
+                    // CTAP 2.1 §6.5.2.2: the mismatch that reaches the uvRetries limit is
+                    // reported as UV_BLOCKED, not as a generic denial; later requests are
+                    // refused with the same code by `check_builtin_uv`.
+                    _ if blocked => status::UV_BLOCKED,
+                    // A single mismatch is an ordinary refusal; the platform may retry.
                     _ => status::OPERATION_DENIED,
                 });
             }

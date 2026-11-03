@@ -46,6 +46,11 @@ impl<T: TpmOps> Authenticator<T> {
             return Err(status::INVALID_OPTION);
         }
         let silent = option(&req, 5, "up")? == Some(false);
+        // Same mapping as makeCredential: `uv: true|absent|false` is
+        // required|preferred|discouraged. UV is always verified (credProtect level 3), so
+        // the option can never weaken the request, but it must still be well-typed
+        // (CTAP 2.1 §6.2.2).
+        let _ = option(&req, 5, "uv")?;
         let rp_id_hash = RpIdHash(sha256(&[rp_id.as_bytes()]));
 
         let param = opt_bytes(get(&req, 6))?;
