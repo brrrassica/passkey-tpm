@@ -5,18 +5,79 @@ use sha2::{Digest as _, Sha256};
 
 use crate::tpm_iface::TpmError;
 
-/// CTAP command bytes (CTAP 2.1 §6).
-pub mod cmd {
-    pub const MAKE_CREDENTIAL: u8 = 0x01;
-    pub const GET_ASSERTION: u8 = 0x02;
-    pub const GET_INFO: u8 = 0x04;
-    pub const CLIENT_PIN: u8 = 0x06;
-    pub const RESET: u8 = 0x07;
-    pub const GET_NEXT_ASSERTION: u8 = 0x08;
-    pub const CREDENTIAL_MANAGEMENT: u8 = 0x0A;
-    pub const SELECTION: u8 = 0x0B;
-    /// Pre-release credentialManagement command byte still sent by some platforms.
-    pub const CREDENTIAL_MANAGEMENT_PREVIEW: u8 = 0x41;
+/// A fieldless enum over protocol codes of type `$repr`, with `from_code` / `code`.
+macro_rules! code_enum {
+    ($(#[$meta:meta])* $name:ident: $repr:ty {
+        $($(#[$vmeta:meta])* $variant:ident = $value:literal,)*
+    }) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum $name {
+            $($(#[$vmeta])* $variant,)*
+        }
+
+        impl $name {
+            /// The variant for `code`, if it is one this authenticator knows.
+            #[must_use]
+            pub fn from_code(code: $repr) -> Option<Self> {
+                match code {
+                    $($value => Some(Self::$variant),)*
+                    _ => None,
+                }
+            }
+
+            /// The wire value.
+            #[must_use]
+            pub const fn code(self) -> $repr {
+                match self {
+                    $(Self::$variant => $value,)*
+                }
+            }
+        }
+    };
+}
+
+code_enum! {
+    /// CTAP command bytes (CTAP 2.1 §6).
+    Command: u8 {
+        MakeCredential = 0x01,
+        GetAssertion = 0x02,
+        GetInfo = 0x04,
+        ClientPin = 0x06,
+        Reset = 0x07,
+        GetNextAssertion = 0x08,
+        CredentialManagement = 0x0A,
+        Selection = 0x0B,
+        /// Pre-release credentialManagement command byte still sent by some platforms.
+        CredentialManagementPreview = 0x41,
+    }
+}
+
+code_enum! {
+    /// clientPIN subcommands (CTAP 2.1 §6.5.5).
+    ClientPinSub: u64 {
+        GetPinRetries = 0x01,
+        GetKeyAgreement = 0x02,
+        SetPin = 0x03,
+        ChangePin = 0x04,
+        GetPinToken = 0x05,
+        GetTokenUsingUv = 0x06,
+        GetUvRetries = 0x07,
+        GetTokenUsingPin = 0x09,
+    }
+}
+
+code_enum! {
+    /// authenticatorCredentialManagement subcommands (CTAP 2.1 §6.8).
+    CredMgmtSub: u64 {
+        GetCredsMetadata = 0x01,
+        EnumerateRpsBegin = 0x02,
+        EnumerateRpsNext = 0x03,
+        EnumerateCredentialsBegin = 0x04,
+        EnumerateCredentialsNext = 0x05,
+        DeleteCredential = 0x06,
+        UpdateUserInformation = 0x07,
+    }
 }
 
 /// CTAP status codes (CTAP 2.1 §8.2).

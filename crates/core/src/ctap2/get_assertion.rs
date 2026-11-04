@@ -11,7 +11,7 @@ use super::common::{
     NEXT_ASSERTION_TIMEOUT_MS,
 };
 use super::state::{Found, HmacRequest, NextAssertion};
-use crate::evidence::{auth_data, UvEvidence};
+use crate::evidence::{auth_data, Presence, UvEvidence};
 use crate::token::PERM_GA;
 use crate::tpm_iface::{RpIdHash, TpmOps, Uid};
 use zeroize::Zeroizing;
@@ -45,7 +45,11 @@ impl<T: TpmOps> Authenticator<T> {
         if option(&req, 5, "rk")?.is_some() {
             return Err(status::INVALID_OPTION);
         }
-        let silent = option(&req, 5, "up")? == Some(false);
+        let presence = if option(&req, 5, "up")? == Some(false) {
+            Presence::Silent
+        } else {
+            Presence::Required
+        };
         // Same mapping as makeCredential: `uv: true|absent|false` is
         // required|preferred|discouraged. UV is always verified (credProtect level 3), so
         // the option can never weaken the request, but it must still be well-typed
@@ -72,27 +76,47 @@ impl<T: TpmOps> Authenticator<T> {
                     message: &cdh,
                     perm: PERM_GA,
                     rp: Some(&rp_id_hash),
+                    presence,
                 };
                 Some(self.verify_auth_param(uid, &check, now_ms)?)
             }
             None => None,
         };
 
-        let (found, discoverable) = self.locate(uid, &rp_id_hash, rp_id, get(&req, 3))?;
-        if silent {
-            // Every credential requires UV and a signature needs it: silent probes can only
-            // learn that nothing is here.
-            return Err(if found.is_empty() {
-                status::NO_CREDENTIALS
-            } else {
-                status::UNSUPPORTED_OPTION
-            });
+        // Every credential requires UV (credProtect=3): a silent probe without a token learns
+        // nothing, not even whether a credential exists (HARD-07).
+        if presence == Presence::Silent && verification.is_none() {
+            return Err(status::NO_CREDENTIALS);
         }
 
+        let (found, discoverable) = self.locate(uid, &rp_id_hash, rp_id, get(&req, 3))?;
         let hmac = match get(&req, 4).and_then(|ext| get_text(ext, "hmac-secret")) {
             Some(h) => Some(self.parse_hmac_secret(uid, h)?),
             None => None,
         };
+        if presence == Presence::Silent {
+            // Silent probe with a verified token (Firefox filters allowList/excludeList this
+            // way): a real assertion with UP=0, still through the UV gate, and the token keeps
+            // its presence for the request that follows.
+            let Some(first) = found.first() else {
+                return Err(status::NO_CREDENTIALS);
+            };
+            let ev = UvEvidence::from_token(uid.0);
+            return Ok(Step::Done(
+                self.assertion(
+                    uid,
+                    &rp_id_hash,
+                    &cdh,
+                    first,
+                    &ev,
+                    Presence::Silent,
+                    hmac.as_ref(),
+                    None,
+                )
+                .unwrap_or_else(super::common::error),
+            ));
+        }
+
         let request = Request {
             rp_id_hash,
             client_data_hash: cdh,
@@ -134,23 +158,27 @@ impl<T: TpmOps> Authenticator<T> {
             if ids.len() > MAX_CREDENTIAL_COUNT_IN_LIST {
                 return Err(status::LIMIT_EXCEEDED);
             }
-            for id in ids {
-                if let Some(blobs) = self
-                    .tpm
-                    .open_credential_id(uid, rp_id_hash, id)
-                    .map_err(map_tpm_error)?
-                {
-                    return Ok((
-                        vec![Found {
-                            id: id.to_vec(),
-                            blobs,
-                            user: None,
-                        }],
-                        false,
-                    ));
+            if !ids.is_empty() {
+                for id in ids {
+                    if let Some(blobs) = self
+                        .tpm
+                        .open_credential_id(uid, rp_id_hash, id)
+                        .map_err(map_tpm_error)?
+                    {
+                        return Ok((
+                            vec![Found {
+                                id: id.to_vec(),
+                                blobs,
+                                user: None,
+                            }],
+                            false,
+                        ));
+                    }
                 }
+                return Ok((Vec::new(), false));
             }
-            return Ok((Vec::new(), false));
+            // An empty allowList means "no restriction" (WebAuthn L3 §5.1.3): fall
+            // through to the discoverable path instead of returning NO_CREDENTIALS.
         }
         let entries = self.tpm.resident_entries(uid).map_err(map_tpm_error)?;
         let mut found = Vec::new();
@@ -188,6 +216,7 @@ impl<T: TpmOps> Authenticator<T> {
             &r.client_data_hash,
             &first,
             &ev,
+            Presence::Required,
             r.hmac.as_ref(),
             (r.discoverable && total > 1).then_some(total),
         )?;
@@ -223,6 +252,7 @@ impl<T: TpmOps> Authenticator<T> {
             &next.client_data_hash,
             &found,
             &ev,
+            Presence::Required,
             None,
             None,
         )?;
@@ -261,6 +291,7 @@ impl<T: TpmOps> Authenticator<T> {
         client_data_hash: &[u8; 32],
         found: &Found,
         ev: &UvEvidence,
+        presence: Presence,
         hmac: Option<&HmacRequest>,
         number_of_credentials: Option<usize>,
     ) -> Parsed<Vec<u8>> {
@@ -277,7 +308,7 @@ impl<T: TpmOps> Authenticator<T> {
                 )])))
             }
         };
-        let auth = auth_data(&rp_id_hash.0, ev, None, ext.as_deref());
+        let auth = auth_data(&rp_id_hash.0, ev, presence, None, ext.as_deref());
         let digest = sha256(&[&auth, client_data_hash]);
         let sig = self
             .tpm

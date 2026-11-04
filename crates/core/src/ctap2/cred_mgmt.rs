@@ -6,22 +6,14 @@ use passkey_tpm_wire::resident::{self, ResidentEntry};
 use super::authn::{AuthCheck, Authenticator};
 use super::common::{
     bytes32, cose_es256, descriptor, get, get_text, int, map_tpm_error, ok, ok_empty, opt_bytes,
-    opt_text, opt_uint, parse_map, sha256, status, text, truncate, Parsed, MAX_RESIDENT,
+    opt_text, opt_uint, parse_map, sha256, status, text, truncate, CredMgmtSub, Parsed,
+    MAX_RESIDENT,
 };
 use super::make_credential::APPLIED_CRED_PROTECT;
 use super::state::CredMgmtCursor;
+use crate::evidence::Presence;
 use crate::token::PERM_CM;
 use crate::tpm_iface::{RpIdHash, TpmOps, Uid};
-
-mod sub {
-    pub const GET_CREDS_METADATA: u64 = 0x01;
-    pub const ENUMERATE_RPS_BEGIN: u64 = 0x02;
-    pub const ENUMERATE_RPS_NEXT: u64 = 0x03;
-    pub const ENUMERATE_CREDENTIALS_BEGIN: u64 = 0x04;
-    pub const ENUMERATE_CREDENTIALS_NEXT: u64 = 0x05;
-    pub const DELETE_CREDENTIAL: u64 = 0x06;
-    pub const UPDATE_USER_INFORMATION: u64 = 0x07;
-}
 
 fn count(n: usize) -> Value {
     Value::Uint(u64::try_from(n).unwrap_or(u64::MAX))
@@ -62,13 +54,14 @@ impl<T: TpmOps> Authenticator<T> {
     ) -> Parsed<Vec<u8>> {
         let req = parse_map(params)?;
         let subcommand = opt_uint(get(&req, 1))?.ok_or(status::MISSING_PARAMETER)?;
+        let sub = CredMgmtSub::from_code(subcommand);
         let sub_params = get(&req, 2);
         let protocol = opt_uint(get(&req, 3))?;
 
         // The GetNext* subcommands carry no authentication; they continue a cursor.
-        match subcommand {
-            sub::ENUMERATE_RPS_NEXT => return self.next_rp(uid),
-            sub::ENUMERATE_CREDENTIALS_NEXT => return self.next_credential(uid),
+        match sub {
+            Some(CredMgmtSub::EnumerateRpsNext) => return self.next_rp(uid),
+            Some(CredMgmtSub::EnumerateCredentialsNext) => return self.next_credential(uid),
             _ => {}
         }
 
@@ -84,11 +77,11 @@ impl<T: TpmOps> Authenticator<T> {
         let mut entries = self.tpm.resident_entries(uid).map_err(map_tpm_error)?;
         // Delete/update are scoped to the credential's RP, so a token bound to that RP may
         // manage its credentials (CTAP 2.1 §6.8).
-        let rp_scope = match subcommand {
-            sub::ENUMERATE_CREDENTIALS_BEGIN => {
+        let rp_scope = match sub {
+            Some(CredMgmtSub::EnumerateCredentialsBegin) => {
                 Some(RpIdHash(bytes32(sub_params.and_then(|p| get(p, 1)))?))
             }
-            sub::DELETE_CREDENTIAL | sub::UPDATE_USER_INFORMATION => {
+            Some(CredMgmtSub::DeleteCredential | CredMgmtSub::UpdateUserInformation) => {
                 // Authenticate before the lookup so NO_CREDENTIALS is no oracle for an
                 // unauthenticated caller (HARD-14); the RP scope is checked below.
                 self.verify_auth_mac(uid, protocol, param, &message)?;
@@ -111,15 +104,16 @@ impl<T: TpmOps> Authenticator<T> {
             message: &message,
             perm: PERM_CM,
             rp: rp_scope.as_ref(),
+            presence: Presence::Required,
         };
         self.verify_auth_param(uid, &check, now_ms)?;
 
-        match subcommand {
-            sub::GET_CREDS_METADATA => Ok(ok(&Value::Map(vec![
+        match sub {
+            Some(CredMgmtSub::GetCredsMetadata) => Ok(ok(&Value::Map(vec![
                 (int(1), count(entries.len())),
                 (int(2), count(MAX_RESIDENT.saturating_sub(entries.len()))),
             ]))),
-            sub::ENUMERATE_RPS_BEGIN => {
+            Some(CredMgmtSub::EnumerateRpsBegin) => {
                 let rps: Vec<(String, String)> = resident::rps(&entries)
                     .into_iter()
                     .map(|(id, name)| (id.to_owned(), name.to_owned()))
@@ -131,7 +125,7 @@ impl<T: TpmOps> Authenticator<T> {
                 self.user(uid).cred_mgmt = Some(CredMgmtCursor::Rps(rest.to_vec()));
                 Ok(response)
             }
-            sub::ENUMERATE_CREDENTIALS_BEGIN => {
+            Some(CredMgmtSub::EnumerateCredentialsBegin) => {
                 let rp_id_hash = rp_scope.ok_or(status::MISSING_PARAMETER)?;
                 let mut matching: Vec<ResidentEntry> = entries
                     .into_iter()
@@ -149,7 +143,7 @@ impl<T: TpmOps> Authenticator<T> {
                 });
                 Ok(response)
             }
-            sub::DELETE_CREDENTIAL => {
+            Some(CredMgmtSub::DeleteCredential) => {
                 let id = sub_params
                     .and_then(|p| get(p, 2))
                     .and_then(|d| get_text(d, "id"))
@@ -165,7 +159,7 @@ impl<T: TpmOps> Authenticator<T> {
                     .map_err(map_tpm_error)?;
                 Ok(ok_empty())
             }
-            sub::UPDATE_USER_INFORMATION => {
+            Some(CredMgmtSub::UpdateUserInformation) => {
                 let p = sub_params.ok_or(status::MISSING_PARAMETER)?;
                 let id = get(p, 2)
                     .and_then(|d| get_text(d, "id"))

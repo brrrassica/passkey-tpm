@@ -6,25 +6,13 @@ use zeroize::Zeroizing;
 use super::authn::{Authenticator, Pending, PendingKind, Step, UserInfo};
 use super::common::{
     get, int, map_tpm_error, ok, ok_empty, opt_bytes, opt_text, opt_uint, parse_map, sha256,
-    status, Parsed, MAX_UV_RETRIES, MIN_PIN_LENGTH,
+    status, ClientPinSub, Parsed, MAX_UV_RETRIES, MIN_PIN_LENGTH,
 };
 use super::state::IssuedToken;
 use crate::pin_protocol::{self, Protocol, SharedSecret};
 use crate::pin_retries::MAX_PIN_RETRIES;
 use crate::token::{PinUvAuthToken, TokenGrant, PERM_GA, PERM_MC, SUPPORTED_PERMS};
 use crate::tpm_iface::{TpmError, TpmOps, Uid};
-
-/// clientPIN subcommands.
-mod sub {
-    pub const GET_PIN_RETRIES: u64 = 0x01;
-    pub const GET_KEY_AGREEMENT: u64 = 0x02;
-    pub const SET_PIN: u64 = 0x03;
-    pub const CHANGE_PIN: u64 = 0x04;
-    pub const GET_PIN_TOKEN: u64 = 0x05;
-    pub const GET_TOKEN_USING_UV: u64 = 0x06;
-    pub const GET_UV_RETRIES: u64 = 0x07;
-    pub const GET_TOKEN_USING_PIN: u64 = 0x09;
-}
 
 /// A getPinUvAuthTokenUsingUvWithPermissions request waiting for the fingerprint.
 #[derive(Debug)]
@@ -81,41 +69,43 @@ impl<T: TpmOps> Authenticator<T> {
         let req = parse_map(params)?;
         let subcommand = opt_uint(get(&req, 2))?.ok_or(status::MISSING_PARAMETER)?;
         let protocol = opt_uint(get(&req, 1))?;
-        match subcommand {
-            sub::GET_PIN_RETRIES => {
+        match ClientPinSub::from_code(subcommand) {
+            Some(ClientPinSub::GetPinRetries) => {
                 let retries = self.tpm.pin_retries(uid).map_err(map_tpm_error)?;
                 Ok(Step::Done(ok(&Value::Map(vec![(
                     int(3),
                     Value::Uint(u64::from(retries)),
                 )]))))
             }
-            sub::GET_UV_RETRIES => {
+            Some(ClientPinSub::GetUvRetries) => {
                 let left = MAX_UV_RETRIES.saturating_sub(self.user(uid).uv_failures);
                 Ok(Step::Done(ok(&Value::Map(vec![(
                     int(5),
                     Value::Uint(u64::from(left)),
                 )]))))
             }
-            sub::GET_KEY_AGREEMENT => {
+            Some(ClientPinSub::GetKeyAgreement) => {
                 let _ = Self::protocol(protocol)?;
                 let key = self.user(uid).key_agreement()?.cose_public();
                 Ok(Step::Done(ok(&Value::Map(vec![(int(1), key)]))))
             }
-            sub::SET_PIN => self.set_pin(uid, &req, protocol).map(Step::Done),
-            sub::CHANGE_PIN => self.change_pin(uid, &req, protocol).map(Step::Done),
-            sub::GET_PIN_TOKEN => {
+            Some(ClientPinSub::SetPin) => self.set_pin(uid, &req, protocol).map(Step::Done),
+            Some(ClientPinSub::ChangePin) => self.change_pin(uid, &req, protocol).map(Step::Done),
+            Some(ClientPinSub::GetPinToken) => {
                 if get(&req, 9).is_some() || get(&req, 10).is_some() {
                     return Err(status::INVALID_PARAMETER);
                 }
                 self.token_using_pin(uid, &req, protocol, PERM_MC | PERM_GA, None, now_ms)
                     .map(Step::Done)
             }
-            sub::GET_TOKEN_USING_PIN => {
+            Some(ClientPinSub::GetTokenUsingPin) => {
                 let (permissions, rp) = Self::permissions(&req)?;
                 self.token_using_pin(uid, &req, protocol, permissions, rp, now_ms)
                     .map(Step::Done)
             }
-            sub::GET_TOKEN_USING_UV => self.prepare_token_using_uv(uid, user, &req, protocol),
+            Some(ClientPinSub::GetTokenUsingUv) => {
+                self.prepare_token_using_uv(uid, user, &req, protocol)
+            }
             _ => Err(status::INVALID_SUBCOMMAND),
         }
     }

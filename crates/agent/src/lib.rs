@@ -5,6 +5,7 @@
 //! to `/dev/uhid`, the broker on the system bus, and desktop notifications. The agent makes
 //! no security decisions: the broker validates everything and the TPM enforces the policy.
 
+use passkey_tpm_core::ctap2::{ClientPinSub, Command};
 use passkey_tpm_core::ctaphid::{
     error_report, fragment, init_response, keepalive_report, Action, Assembler, BROADCAST_CID,
     CMD_CANCEL, CMD_CBOR, CMD_ERROR, CMD_INIT, CMD_PING, CMD_WINK, ERR_CHANNEL_BUSY,
@@ -30,6 +31,8 @@ pub enum Effect {
     Cancel,
     /// Show a desktop notification asking for the fingerprint, naming the relying party.
     Prompt(String),
+    /// The request that showed the last [`Effect::Prompt`] has ended: close its notification.
+    EndPrompt,
 }
 
 #[derive(Debug)]
@@ -37,6 +40,19 @@ struct InFlight {
     id: u64,
     cid: u32,
     keepalive_status: u8,
+    /// An [`Effect::Prompt`] was shown for this request.
+    prompted: bool,
+}
+
+impl InFlight {
+    /// Effects for this request ending: close its prompt, if any.
+    fn end(&self) -> Vec<Effect> {
+        if self.prompted {
+            vec![Effect::EndPrompt]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 /// CTAPHID session state.
@@ -74,33 +90,51 @@ fn error(cid: u32, code: u8) -> Effect {
     Effect::Write(vec![error_report(cid, code)])
 }
 
+/// True if the options map at `key` has `up` set to false: a silent request, no gesture.
+fn silent(map: &Value, key: u64) -> bool {
+    map.map_get(&Value::Uint(key))
+        .and_then(|o| o.map_get(&Value::Text("up".into())))
+        == Some(&Value::Bool(false))
+}
+
 /// What to name in the fingerprint prompt for a request that needs a gesture, if any.
 /// Informational only: the broker decides whether a gesture is needed.
 #[must_use]
 pub fn relying_party(request: &[u8]) -> Option<String> {
-    let (&command, params) = request.split_first()?;
+    let (&byte, params) = request.split_first()?;
     let map = || cbor::decode(params).ok();
-    match command {
-        0x01 => map()?
-            .map_get(&Value::Uint(2))?
-            .map_get(&Value::Text("id".into()))?
-            .as_text()
-            .map(str::to_owned),
-        0x02 => map()?
-            .map_get(&Value::Uint(1))?
-            .as_text()
-            .map(str::to_owned),
-        // clientPIN getPinUvAuthTokenUsingUvWithPermissions.
-        0x06 => {
+    match Command::from_code(byte)? {
+        Command::MakeCredential => {
             let m = map()?;
-            (m.map_get(&Value::Uint(2))?.as_uint()? == 6).then(|| {
+            if silent(&m, 7) {
+                return None;
+            }
+            m.map_get(&Value::Uint(2))?
+                .map_get(&Value::Text("id".into()))?
+                .as_text()
+                .map(str::to_owned)
+        }
+        // Firefox filters allowList/excludeList with silent getAssertions first.
+        Command::GetAssertion => {
+            let m = map()?;
+            if silent(&m, 5) {
+                return None;
+            }
+            m.map_get(&Value::Uint(1))?.as_text().map(str::to_owned)
+        }
+        // clientPIN getPinUvAuthTokenUsingUvWithPermissions.
+        Command::ClientPin => {
+            let m = map()?;
+            (ClientPinSub::from_code(m.map_get(&Value::Uint(2))?.as_uint()?)
+                == Some(ClientPinSub::GetTokenUsingUv))
+            .then(|| {
                 m.map_get(&Value::Uint(10))
                     .and_then(Value::as_text)
                     .map_or_else(|| "passkey-tpm".to_owned(), str::to_owned)
             })
         }
-        0x07 => Some("reset passkey-tpm".to_owned()),
-        0x0B => Some("select passkey-tpm".to_owned()),
+        Command::Reset => Some("reset passkey-tpm".to_owned()),
+        Command::Selection => Some("select passkey-tpm".to_owned()),
         _ => None,
     }
 }
@@ -163,9 +197,9 @@ impl<R: FnMut() -> u32> Hid<R> {
             let new_cid = if cid == BROADCAST_CID {
                 self.allocate()
             } else {
-                if self.in_flight.as_ref().is_some_and(|busy| busy.cid == cid) {
-                    self.in_flight = None;
+                if let Some(busy) = self.in_flight.take_if(|busy| busy.cid == cid) {
                     effects.push(Effect::Cancel);
+                    effects.extend(busy.end());
                 }
                 cid
             };
@@ -206,6 +240,7 @@ impl<R: FnMut() -> u32> Hid<R> {
                     } else {
                         STATUS_PROCESSING
                     },
+                    prompted: prompt.is_some(),
                 });
                 let mut effects = Vec::new();
                 if let Some(rp) = prompt {
@@ -241,7 +276,11 @@ impl<R: FnMut() -> u32> Hid<R> {
     /// (it may have been aborted by INIT or [`Hid::reset`]).
     pub fn on_broker_reply(&mut self, id: u64, response: &[u8]) -> Vec<Effect> {
         match self.in_flight.take() {
-            Some(busy) if busy.id == id => vec![reports(busy.cid, CMD_CBOR, response)],
+            Some(busy) if busy.id == id => {
+                let mut effects = vec![reports(busy.cid, CMD_CBOR, response)];
+                effects.extend(busy.end());
+                effects
+            }
             other => {
                 self.in_flight = other;
                 Vec::new()
@@ -259,13 +298,16 @@ impl<R: FnMut() -> u32> Hid<R> {
     /// channel and partial message, and cancel the in-flight request so no prompt or late
     /// reply survives the switch.
     pub fn reset(&mut self) -> Vec<Effect> {
-        let busy = self.in_flight.take().is_some();
+        let busy = self.in_flight.take();
         self.assembler = Assembler::new();
         self.channels.clear();
-        if busy {
-            vec![Effect::Cancel]
-        } else {
-            Vec::new()
+        match busy {
+            Some(busy) => {
+                let mut effects = vec![Effect::Cancel];
+                effects.extend(busy.end());
+                effects
+            }
+            None => Vec::new(),
         }
     }
 }
@@ -336,7 +378,7 @@ mod tests {
     fn cbor_request_is_relayed_with_prompt_keepalive_and_cancel() {
         let mut h = hid();
         let cid = open_channel(&mut h);
-        let mut req = vec![0x02];
+        let mut req = vec![Command::GetAssertion.code()];
         req.extend(cbor::encode(&Value::Map(vec![
             (Value::Uint(1), Value::Text("example.com".into())),
             (Value::Uint(2), Value::Bytes(vec![0; 32])),
@@ -368,24 +410,70 @@ mod tests {
         );
         assert_eq!(
             h.on_broker_reply(1, &[0x2d]),
-            vec![reports(cid, CMD_CBOR, &[0x2d])]
+            vec![reports(cid, CMD_CBOR, &[0x2d]), Effect::EndPrompt]
         );
         assert!(!h.is_busy());
         assert!(h.on_tick(300).is_empty());
     }
 
     #[test]
+    fn silent_requests_show_no_prompt() {
+        let mut h = hid();
+        let cid = open_channel(&mut h);
+        let no_up = Value::Map(vec![(Value::Text("up".into()), Value::Bool(false))]);
+        let mut req = vec![Command::GetAssertion.code()];
+        req.extend(cbor::encode(&Value::Map(vec![
+            (Value::Uint(1), Value::Text("example.com".into())),
+            (Value::Uint(2), Value::Bytes(vec![0; 32])),
+            (Value::Uint(5), no_up.clone()),
+        ])));
+        assert_eq!(relying_party(&req), None);
+        let effects = h.on_output(&init_packet(cid, CMD_CBOR, &req), 0);
+        assert_eq!(
+            effects,
+            vec![Effect::Broker {
+                id: 1,
+                request: req
+            }]
+        );
+        assert_eq!(
+            h.on_tick(100),
+            vec![Effect::Write(vec![keepalive_report(
+                cid,
+                STATUS_PROCESSING
+            )])]
+        );
+        assert_eq!(
+            h.on_broker_reply(1, &[0x2e]),
+            vec![reports(cid, CMD_CBOR, &[0x2e])],
+            "nothing to close"
+        );
+        let mut mc = vec![Command::MakeCredential.code()];
+        mc.extend(cbor::encode(&Value::Map(vec![
+            (
+                Value::Uint(2),
+                Value::Map(vec![(
+                    Value::Text("id".into()),
+                    Value::Text("rp.test".into()),
+                )]),
+            ),
+            (Value::Uint(7), no_up),
+        ])));
+        assert_eq!(relying_party(&mc), None);
+    }
+
+    #[test]
     fn reset_cancels_the_request_and_forgets_channels() {
         let mut h = hid();
         let cid = open_channel(&mut h);
-        let mut req = vec![0x02];
+        let mut req = vec![Command::GetAssertion.code()];
         req.extend(cbor::encode(&Value::Map(vec![
             (Value::Uint(1), Value::Text("example.com".into())),
             (Value::Uint(2), Value::Bytes(vec![0; 32])),
         ])));
         h.on_output(&init_packet(cid, CMD_CBOR, &req), 0);
         assert!(h.is_busy());
-        assert_eq!(h.reset(), vec![Effect::Cancel]);
+        assert_eq!(h.reset(), vec![Effect::Cancel, Effect::EndPrompt]);
         assert!(!h.is_busy());
         // A late broker reply goes nowhere, and the old channel is gone.
         assert!(h.on_broker_reply(1, &[0x00]).is_empty());
@@ -402,7 +490,7 @@ mod tests {
         let mut h = hid();
         let cid = open_channel(&mut h);
         let nonce = [9, 8, 7, 6, 5, 4, 3, 2];
-        h.on_output(&init_packet(cid, CMD_CBOR, &[0x04]), 0);
+        h.on_output(&init_packet(cid, CMD_CBOR, &[Command::GetInfo.code()]), 0);
         assert!(h.is_busy());
         assert_eq!(
             h.on_output(&init_packet(cid, CMD_INIT, &nonce), 10),
@@ -418,10 +506,10 @@ mod tests {
         );
         // A new request on the resynced channel never gets the aborted one's late reply.
         assert_eq!(
-            h.on_output(&init_packet(cid, CMD_CBOR, &[0x04]), 200),
+            h.on_output(&init_packet(cid, CMD_CBOR, &[Command::GetInfo.code()]), 200),
             vec![Effect::Broker {
                 id: 2,
-                request: vec![0x04]
+                request: vec![Command::GetInfo.code()]
             }]
         );
         assert!(h.on_broker_reply(1, &[0x2d]).is_empty());
@@ -443,7 +531,7 @@ mod tests {
         // An allocated channel resyncs without touching another channel's request.
         let busy = open_channel(&mut h);
         let idle = open_channel(&mut h);
-        h.on_output(&init_packet(busy, CMD_CBOR, &[0x04]), 0);
+        h.on_output(&init_packet(busy, CMD_CBOR, &[Command::GetInfo.code()]), 0);
         assert_eq!(
             h.on_output(&init_packet(idle, CMD_INIT, &nonce), 10),
             vec![reports(
@@ -460,10 +548,10 @@ mod tests {
         let mut h = hid();
         let cid = open_channel(&mut h);
         assert_eq!(
-            h.on_output(&init_packet(cid, CMD_CBOR, &[0x04]), 0),
+            h.on_output(&init_packet(cid, CMD_CBOR, &[Command::GetInfo.code()]), 0),
             vec![Effect::Broker {
                 id: 1,
-                request: vec![0x04]
+                request: vec![Command::GetInfo.code()]
             }]
         );
         assert_eq!(
@@ -477,7 +565,7 @@ mod tests {
 
     #[test]
     fn relying_party_extraction() {
-        let mut mc = vec![0x01];
+        let mut mc = vec![Command::MakeCredential.code()];
         mc.extend(cbor::encode(&Value::Map(vec![(
             Value::Uint(2),
             Value::Map(vec![(
@@ -486,15 +574,18 @@ mod tests {
             )]),
         )])));
         assert_eq!(relying_party(&mc).as_deref(), Some("rp.test"));
-        assert_eq!(relying_party(&[0x04]), None);
-        assert_eq!(relying_party(&[0x07]).as_deref(), Some("reset passkey-tpm"));
-        let mut uv_token = vec![0x06];
+        assert_eq!(relying_party(&[Command::GetInfo.code()]), None);
+        assert_eq!(
+            relying_party(&[Command::Reset.code()]).as_deref(),
+            Some("reset passkey-tpm")
+        );
+        let mut uv_token = vec![Command::ClientPin.code()];
         uv_token.extend(cbor::encode(&Value::Map(vec![
             (Value::Uint(2), Value::Uint(6)),
             (Value::Uint(10), Value::Text("rp.test".into())),
         ])));
         assert_eq!(relying_party(&uv_token).as_deref(), Some("rp.test"));
-        let mut retries = vec![0x06];
+        let mut retries = vec![Command::ClientPin.code()];
         retries.extend(cbor::encode(&Value::Map(vec![(
             Value::Uint(2),
             Value::Uint(1),
@@ -504,6 +595,6 @@ mod tests {
             None,
             "getPINRetries needs no gesture"
         );
-        assert_eq!(relying_party(&[0x02, 0xff]), None);
+        assert_eq!(relying_party(&[Command::GetAssertion.code(), 0xff]), None);
     }
 }

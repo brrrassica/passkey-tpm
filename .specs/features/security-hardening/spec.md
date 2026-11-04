@@ -1,7 +1,7 @@
 # Security Hardening (code review 2026-10-04) — Specification
 
 **Size:** Large (multi-component: agent, broker, core, tpm, packaging)
-**Status:** 17 of 21 Verified (2026-10-04). Open: HARD-07 (G2), HARD-10 (G4), HARD-13 (G3), HARD-16 (PinRetries); HARD-21 (PKGBUILD checksum) is done at tag time.
+**Status:** 18 of 21 Verified (2026-11-04). Open: HARD-10 (G4), HARD-13 (G3), HARD-16 (PinRetries); HARD-21 (PKGBUILD checksum) is done at tag time.
 **Source:** read-only code review of `main` @ a81da2f, 2026-10-04. The two High findings (F1 session isolation, F3 fprintd activation) were re-checked against the code; the rest must be re-confirmed at the start of their task (write the failing test first).
 
 ## Problem Statement
@@ -28,7 +28,7 @@ The review found a cross-user path on multi-seat / fast-user-switching machines,
 | ID | Question | Options | Recommendation |
 |---|---|---|---|
 | G1 ✅ (both, AD-020) | How is the agent's device bound to an active session? | (a) agent watches logind `Session.Active` and destroys/recreates the uhid device; (b) uvd checks via logind that the caller's session is active on its seat; (c) both | (c): (a) closes the device-ACL hand-over, (b) is the enforcement point the agent can't skip |
-| G2 | Silent `up=false` probes (AD-012) | keep `UNSUPPORTED_OPTION` when a credential exists, or always `NO_CREDENTIALS` without UV (§6.2.2 step 7 for credProtect=3) | always `NO_CREDENTIALS` without UV; amend AD-012 |
+| G2 ✅ (context.md) | Silent `up=false` probes (AD-012) | keep `UNSUPPORTED_OPTION` when a credential exists, or always `NO_CREDENTIALS` without UV (§6.2.2 step 7 for credProtect=3) | always `NO_CREDENTIALS` without UV; amend AD-012 |
 | G3 | authenticatorReset timing (§6.6 "within 10 s of power-up") | 10 s after agent start; 10 s after device (re)creation; CLI-only reset | 10 s after device creation + CLI `passkey-tpm reset` for later |
 | G4 | `/dev/uhid` access | keep `uaccess` (document risk); privileged helper that only creates the FIDO descriptor and passes the fd; uvd creates the device per active session | helper, M3; document risk in beta notes |
 
@@ -116,7 +116,7 @@ The review found a cross-user path on multi-seat / fast-user-switching machines,
 | HARD-04 | UV/PIN-blocked in gesture path | P1 | F6 | Execute | Verified (unit + Verus) |
 | HARD-05 | DA budget across reset | P2 | F5 | Execute | Verified (integration-tpm, DA maxTries 3 and 32) |
 | HARD-06 | Crash-safe PIN rotation | P2 | F7 | Execute | Verified (integration-tpm fault injection after each step) |
-| HARD-07 | up=false probe oracle | P2 | F8 | Tasks (G2) | Pending |
+| HARD-07 | up=false probe oracle | P2 | F8 | Execute | Verified (unit + Verus) |
 | HARD-08 | hmac-secret on non-hmac credential | P2 | F9 | Execute | Verified (integration-tpm + unit) |
 | HARD-09 | Lazy provisioning + cleanup | P2 | F10 | Execute | Verified (integration-tpm + VM) |
 | HARD-10 | `/dev/uhid` least privilege | P2 | F2 | Design (G4) | Pending |

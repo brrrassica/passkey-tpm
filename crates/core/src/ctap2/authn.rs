@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use super::common::{error, status, Parsed};
 use super::state::{HmacRequest, UserState};
-use crate::evidence::UvEvidence;
+use crate::evidence::{Presence, UvEvidence};
 use crate::pin_protocol::{self, Protocol};
 use crate::tpm_iface::{RpIdHash, TpmOps, Uid};
 
@@ -87,6 +87,7 @@ pub struct Authenticator<T: TpmOps> {
 }
 
 /// A pinUvAuthParam to check: over `message`, for permission `perm` and relying party `rp`.
+/// A [`Presence::Required`] request consumes the token's presence; a silent one leaves it.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AuthCheck<'a> {
     pub protocol: Option<u64>,
@@ -94,6 +95,7 @@ pub(super) struct AuthCheck<'a> {
     pub message: &'a [u8],
     pub perm: u8,
     pub rp: Option<&'a RpIdHash>,
+    pub presence: Presence,
 }
 
 /// Where a request's user verification comes from.
@@ -125,32 +127,40 @@ impl<T: TpmOps> Authenticator<T> {
 
     /// Phase 1. `now_ms` is a monotonic clock in milliseconds.
     pub fn prepare(&mut self, uid: Uid, user: UserInfo, request: &[u8], now_ms: u64) -> Step {
-        use super::common::cmd;
-        let Some((&command, params)) = request.split_first() else {
+        use super::common::Command;
+        let Some((&byte, params)) = request.split_first() else {
             return Step::Done(error(status::INVALID_LENGTH));
         };
+        let command = Command::from_code(byte);
         // Any command other than getNextAssertion ends a multi-credential assertion
         // (CTAP 2.1 §6.3); any command other than the credMgmt GetNext* ends enumeration.
-        if command != cmd::GET_NEXT_ASSERTION {
+        if command != Some(Command::GetNextAssertion) {
             self.user(uid).next_assertion = None;
         }
-        if command != cmd::CREDENTIAL_MANAGEMENT && command != cmd::CREDENTIAL_MANAGEMENT_PREVIEW {
+        if !matches!(
+            command,
+            Some(Command::CredentialManagement | Command::CredentialManagementPreview)
+        ) {
             self.user(uid).cred_mgmt = None;
         }
+        let Some(command) = command else {
+            return Step::Done(error(status::INVALID_COMMAND));
+        };
         let result = match command {
-            cmd::GET_INFO => Ok(Step::Done(self.get_info(uid, user))),
-            cmd::MAKE_CREDENTIAL => self.prepare_make_credential(uid, user, params, now_ms),
-            cmd::GET_ASSERTION => self.prepare_get_assertion(uid, user, params, now_ms),
-            cmd::GET_NEXT_ASSERTION => self.get_next_assertion(uid, now_ms).map(Step::Done),
-            cmd::CLIENT_PIN => self.client_pin(uid, user, params, now_ms),
-            cmd::CREDENTIAL_MANAGEMENT | cmd::CREDENTIAL_MANAGEMENT_PREVIEW => self
+            Command::GetInfo => Ok(Step::Done(self.get_info(uid, user))),
+            Command::MakeCredential => self.prepare_make_credential(uid, user, params, now_ms),
+            Command::GetAssertion => self.prepare_get_assertion(uid, user, params, now_ms),
+            Command::GetNextAssertion => self.get_next_assertion(uid, now_ms).map(Step::Done),
+            Command::ClientPin => self.client_pin(uid, user, params, now_ms),
+            Command::CredentialManagement | Command::CredentialManagementPreview => self
                 .credential_management(uid, params, now_ms)
                 .map(Step::Done),
-            cmd::RESET => Self::need_gesture(uid, user, "reset passkey-tpm", PendingKind::Reset),
-            cmd::SELECTION => {
+            Command::Reset => {
+                Self::need_gesture(uid, user, "reset passkey-tpm", PendingKind::Reset)
+            }
+            Command::Selection => {
                 Self::need_gesture(uid, user, "select passkey-tpm", PendingKind::Selection)
             }
-            _ => Err(status::INVALID_COMMAND),
         };
         result.unwrap_or_else(|code| Step::Done(error(code)))
     }
@@ -298,6 +308,7 @@ impl<T: TpmOps> Authenticator<T> {
             message,
             perm,
             rp,
+            presence,
         } = *check;
         self.verify_auth_mac(uid, protocol, param, message)?;
         let Some(issued) = self.user(uid).token.as_mut() else {
@@ -323,7 +334,7 @@ impl<T: TpmOps> Authenticator<T> {
             }
         }
         Ok(Verification::Token {
-            user_present: grant.take_user_present(),
+            user_present: presence == Presence::Required && grant.take_user_present(),
         })
     }
 

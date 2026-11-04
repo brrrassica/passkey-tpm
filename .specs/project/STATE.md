@@ -80,7 +80,7 @@
 
 ### AD-012: MVP-1 protocol cut (2026-10-03)
 
-**Decision:** Advertise `FIDO_2_0` only. Every operation requires a fingerprint match (UP+UV, UV gate). Credentials are created at credProtect level 3. A credential ID tag (HMAC with per-user K_uid) identifies own credentials before any gesture. Silent probes (`up=false`) get NO_CREDENTIALS, or UNSUPPORTED_OPTION when a matching credential exists. pinAuth means touch, then PIN_NOT_SET.
+**Decision:** Advertise `FIDO_2_0` only. Every operation requires a fingerprint match (UP+UV, UV gate). Credentials are created at credProtect level 3. A credential ID tag (HMAC with per-user K_uid) identifies own credentials before any gesture. Silent probes (`up=false`) get NO_CREDENTIALS, or UNSUPPORTED_OPTION when a matching credential exists (amended 2026-11-04, HARD-07: without a token always NO_CREDENTIALS; with a valid token an assertion with UP=0 through the UV gate, which Firefox needs to filter allowList/excludeList). pinAuth means touch, then PIN_NOT_SET.
 **Reason:** Browsers send `uv` as a plain option to 2.0 authenticators (no pinUvAuthToken needed), and hmac-secret isn't mandatory. Smallest secure cut.
 **Impact:** MVP-2 adds `FIDO_2_1`: clientPIN, getPinUvAuthTokenUsingUv, hmac-secret on the wire, credMgmt, and a presence-only gate.
 

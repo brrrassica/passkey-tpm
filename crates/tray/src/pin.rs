@@ -2,6 +2,7 @@
 //! read whether a PIN is set, set it, change it. The broker derives the user from the bus,
 //! so this only ever touches the calling user's PIN.
 
+use passkey_tpm_core::ctap2::{ClientPinSub, Command};
 use passkey_tpm_core::pin_protocol::{parse_platform_key, KeyAgreement, Protocol, SharedSecret};
 use passkey_tpm_wire::cbor::{self, Value};
 use sha2::{Digest, Sha256};
@@ -10,11 +11,6 @@ use zeroize::Zeroizing;
 
 use crate::probe::{BROKER_NAME, BROKER_PATH};
 
-const CMD_GET_INFO: u8 = 0x04;
-const CMD_CLIENT_PIN: u8 = 0x06;
-const SUB_GET_KEY_AGREEMENT: u64 = 2;
-const SUB_SET_PIN: u64 = 3;
-const SUB_CHANGE_PIN: u64 = 4;
 /// CTAP 2.1 minimum PIN length, in Unicode code points.
 pub const MIN_PIN_CHARS: usize = 4;
 /// Maximum PIN length in bytes (the padded block is 64 bytes and must end with a zero).
@@ -107,8 +103,8 @@ fn ok_body(response: &[u8]) -> Result<Option<Value>, PinError> {
     }
 }
 
-fn request(command: u8, params: Vec<(Value, Value)>) -> Vec<u8> {
-    let mut r = vec![command];
+fn request(command: Command, params: Vec<(Value, Value)>) -> Vec<u8> {
+    let mut r = vec![command.code()];
     r.extend(cbor::encode(&Value::Map(params)));
     r
 }
@@ -119,7 +115,7 @@ fn request(command: u8, params: Vec<(Value, Value)>) -> Vec<u8> {
 ///
 /// [`PinError`] if the broker can't be asked.
 pub async fn is_set(conn: &Connection) -> Result<bool, PinError> {
-    let info = ok_body(&ctap(conn, &[CMD_GET_INFO]).await?)?
+    let info = ok_body(&ctap(conn, &[Command::GetInfo.code()]).await?)?
         .ok_or_else(|| PinError::Protocol("empty getInfo".to_owned()))?;
     Ok(info
         .map_get(&Value::int_key(4))
@@ -138,10 +134,13 @@ impl Session {
         let resp = ctap(
             conn,
             &request(
-                CMD_CLIENT_PIN,
+                Command::ClientPin,
                 vec![
                     (Value::int_key(1), Value::Uint(Protocol::Two.as_u64())),
-                    (Value::int_key(2), Value::Uint(SUB_GET_KEY_AGREEMENT)),
+                    (
+                        Value::int_key(2),
+                        Value::Uint(ClientPinSub::GetKeyAgreement.code()),
+                    ),
                 ],
             ),
         )
@@ -173,14 +172,14 @@ impl Session {
         self.encrypt(&padded)
     }
 
-    fn request(&self, sub: u64, extra: Vec<(Value, Value)>) -> Vec<u8> {
+    fn request(&self, sub: ClientPinSub, extra: Vec<(Value, Value)>) -> Vec<u8> {
         let mut m = vec![
             (Value::int_key(1), Value::Uint(Protocol::Two.as_u64())),
-            (Value::int_key(2), Value::Uint(sub)),
+            (Value::int_key(2), Value::Uint(sub.code())),
             (Value::int_key(3), self.key.cose_public()),
         ];
         m.extend(extra);
-        request(CMD_CLIENT_PIN, m)
+        request(Command::ClientPin, m)
     }
 }
 
@@ -194,7 +193,7 @@ pub async fn set(conn: &Connection, pin: &str) -> Result<(), PinError> {
     let enc = s.new_pin_enc(pin)?;
     let auth = s.shared.authenticate(&enc);
     let req = s.request(
-        SUB_SET_PIN,
+        ClientPinSub::SetPin,
         vec![
             (Value::int_key(4), Value::Bytes(auth)),
             (Value::int_key(5), Value::Bytes(enc)),
@@ -217,7 +216,7 @@ pub async fn change(conn: &Connection, old: &str, new: &str) -> Result<(), PinEr
     message.extend_from_slice(&hash_enc);
     let auth = s.shared.authenticate(&message);
     let req = s.request(
-        SUB_CHANGE_PIN,
+        ClientPinSub::ChangePin,
         vec![
             (Value::int_key(4), Value::Bytes(auth)),
             (Value::int_key(5), Value::Bytes(new_enc)),

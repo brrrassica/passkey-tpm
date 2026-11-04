@@ -46,6 +46,8 @@ fn broker_timeout() -> Duration {
 const STATUS_OTHER: u8 = 0x7F;
 /// Re-check of the seat state in case a logind signal was missed.
 const SEAT_POLL: Duration = Duration::from_secs(2);
+/// Bound on asking fprintd whether to show the fingerprint prompt at all.
+const FPRINTD_TIMEOUT: Duration = Duration::from_secs(2);
 
 enum Input {
     Output(Vec<u8>),
@@ -87,6 +89,22 @@ enum Note {
     Fingerprint(String),
     /// Ask to allow request `id` for this relying party (no fingerprint enrolled).
     Presence { id: u64, rp: String },
+    /// The request behind the last fingerprint prompt ended.
+    Close,
+}
+
+/// Whether this user has a fingerprint to touch. Without one (no reader, fprintd missing,
+/// nothing enrolled) the broker asks for presence instead, so "touch the reader" would only
+/// be a stale banner in front of that question.
+fn has_fingerprint(bus: &Connection, runtime: &tokio::runtime::Handle) -> bool {
+    runtime.block_on(async {
+        tokio::time::timeout(
+            FPRINTD_TIMEOUT,
+            passkey_tpm_uv::fprintd::has_enrolled(bus, ""),
+        )
+        .await
+        .is_ok_and(|r| r.unwrap_or(false))
+    })
 }
 
 /// Shows notifications in order on one thread, so a presence question replaces the
@@ -98,7 +116,7 @@ enum Note {
 fn notifier(bus: Connection, runtime: tokio::runtime::Handle) -> std_mpsc::Sender<Note> {
     let (tx, rx) = std_mpsc::channel::<Note>();
     std::thread::spawn(move || {
-        let mut last: Option<u32> = None;
+        let mut last: Option<notify_rust::NotificationHandle> = None;
         for note in rx {
             let mut n = notify_rust::Notification::new();
             n.appname("passkey-tpm")
@@ -106,9 +124,17 @@ fn notifier(bus: Connection, runtime: tokio::runtime::Handle) -> std_mpsc::Sende
                 .timeout(notify_rust::Timeout::Milliseconds(30_000));
             match note {
                 Note::Fingerprint(rp) => {
+                    if !has_fingerprint(&bus, &runtime) {
+                        continue;
+                    }
                     n.summary("Touch the fingerprint reader")
                         .body(&format!("to continue with {rp}"));
-                    last = n.show().ok().map(|h| h.id());
+                    last = n.show().ok();
+                }
+                Note::Close => {
+                    if let Some(handle) = last.take() {
+                        handle.close();
+                    }
                 }
                 Note::Presence { id, rp } => {
                     n.summary("Allow passkey-tpm?")
@@ -116,7 +142,7 @@ fn notifier(bus: Connection, runtime: tokio::runtime::Handle) -> std_mpsc::Sende
                         .action("allow", "Allow")
                         .action("deny", "Deny");
                     if let Some(previous) = last.take() {
-                        n.id(previous);
+                        n.id(previous.id());
                     }
                     let handle = match n.show() {
                         Ok(h) => h,
@@ -353,6 +379,9 @@ fn apply(
                 });
             }
             Effect::Prompt(rp) => prompt_user(backend, rp, notes),
+            Effect::EndPrompt => {
+                let _ = notes.send(Note::Close);
+            }
         }
     }
 }

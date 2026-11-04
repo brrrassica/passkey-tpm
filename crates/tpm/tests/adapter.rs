@@ -2,7 +2,7 @@ mod support;
 
 use p256::ecdsa::signature::hazmat::PrehashVerifier;
 use p256::ecdsa::{Signature, VerifyingKey};
-use passkey_tpm_core::ctap2::{cmd, status, Authenticator, Step, UserInfo};
+use passkey_tpm_core::ctap2::{status, Authenticator, Command, Step, UserInfo};
 use passkey_tpm_core::tpm_iface::{CredProtect, GateKind, RpIdHash, TpmOps, Uid};
 use passkey_tpm_tpm::adapter::TpmBackend;
 use passkey_tpm_tpm::nvgate;
@@ -42,7 +42,7 @@ fn read_only_calls_provision_nothing() {
     {
         let mut a = Authenticator::new(TpmBackend::new(tpm.context(), dir.clone()));
         let info = UserInfo { uv_enrolled: true };
-        let Step::Done(resp) = a.prepare(alice, info, &[cmd::GET_INFO], 0) else {
+        let Step::Done(resp) = a.prepare(alice, info, &[Command::GetInfo.code()], 0) else {
             panic!("getInfo needs no prompt");
         };
         assert_eq!(resp[0], status::OK);

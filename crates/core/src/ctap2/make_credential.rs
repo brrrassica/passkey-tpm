@@ -9,7 +9,7 @@ use super::common::{
     opt_text, opt_uint, option, parse_map, sha256, status, text, truncate, Parsed, AAGUID, ES256,
     MAX_RESIDENT,
 };
-use crate::evidence::{auth_data, UvEvidence};
+use crate::evidence::{auth_data, Presence, UvEvidence};
 use crate::token::PERM_MC;
 use crate::tpm_iface::{CredProtect, RpIdHash, TpmOps, Uid};
 
@@ -134,6 +134,7 @@ impl<T: TpmOps> Authenticator<T> {
                     message: &cdh,
                     perm: PERM_MC,
                     rp: Some(&rp_id_hash),
+                    presence: Presence::Required,
                 };
                 self.verify_auth_param(uid, &check, now_ms)?
             }
@@ -288,7 +289,13 @@ impl<T: TpmOps> Authenticator<T> {
         }
         let ext_bytes = (!ext.is_empty()).then(|| cbor::encode(&Value::Map(ext)));
 
-        let auth = auth_data(&r.rp_id_hash.0, &ev, Some(&attested), ext_bytes.as_deref());
+        let auth = auth_data(
+            &r.rp_id_hash.0,
+            &ev,
+            Presence::Required,
+            Some(&attested),
+            ext_bytes.as_deref(),
+        );
         let digest = sha256(&[&auth, &r.client_data_hash]);
         let sig = self
             .tpm

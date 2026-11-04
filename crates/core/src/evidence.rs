@@ -20,6 +20,16 @@ pub const FLAG_UV: u8 = 0x04;
 pub const FLAG_AT: u8 = 0x40;
 pub const FLAG_ED: u8 = 0x80;
 
+/// Whether the request asked for user presence (`up` option, CTAP 2.1 §6.2.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// The usual case: a gesture (fingerprint touch, confirmed presence or a token's
+    /// consumed presence) is part of the operation.
+    Required,
+    /// `up=false`: no gesture, the UP flag stays clear.
+    Silent,
+}
+
 /// How the user was verified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UvMethod {
@@ -98,29 +108,36 @@ pub open spec fn spec_has_flag(flags: u8, bit: u8) -> bool {
     flags & bit == bit
 }
 
-/// Flags for authenticator data produced with UV evidence. UP is always set: every
-/// operation includes a presence gesture (fingerprint touch or a token's consumed presence).
-/// AT marks attested credential data, ED extension outputs.
-pub fn uv_flags(_ev: &UvEvidence, attested: bool, extensions: bool) -> (f: u8)
+/// Flags for authenticator data produced with UV evidence. UP is set unless the request is
+/// [`Presence::Silent`]. AT marks attested credential data, ED extension outputs.
+pub fn uv_flags(_ev: &UvEvidence, presence: Presence, attested: bool, extensions: bool) -> (f: u8)
     ensures
-        spec_has_flag(f, FLAG_UP),
+        spec_has_flag(f, FLAG_UP) == (presence is Required),
         spec_has_flag(f, FLAG_UV),
         spec_has_flag(f, FLAG_AT) == attested,
         spec_has_flag(f, FLAG_ED) == extensions,
         // No other bits (BE, BS, reserved) are ever set.
         f & !(FLAG_UP | FLAG_UV | FLAG_AT | FLAG_ED) == 0,
 {
-    // Four possible values; each one's bits are proven below.
-    let f: u8 = match (attested, extensions) {
-        (false, false) => 0x05,
-        (true, false) => 0x45,
-        (false, true) => 0x85,
-        (true, true) => 0xC5,
+    // Eight possible values; each one's bits are proven below.
+    let f: u8 = match (presence, attested, extensions) {
+        (Presence::Required, false, false) => 0x05,
+        (Presence::Required, true, false) => 0x45,
+        (Presence::Required, false, true) => 0x85,
+        (Presence::Required, true, true) => 0xC5,
+        (Presence::Silent, false, false) => 0x04,
+        (Presence::Silent, true, false) => 0x44,
+        (Presence::Silent, false, true) => 0x84,
+        (Presence::Silent, true, true) => 0xC4,
     };
     assert(0x05u8 & 0x01u8 == 0x01u8 && 0x05u8 & 0x04u8 == 0x04u8 && 0x05u8 & 0x40u8 != 0x40u8 && 0x05u8 & 0x80u8 != 0x80u8 && 0x05u8 & !(0x01u8 | 0x04u8 | 0x40u8 | 0x80u8) == 0) by (bit_vector);
     assert(0x45u8 & 0x01u8 == 0x01u8 && 0x45u8 & 0x04u8 == 0x04u8 && 0x45u8 & 0x40u8 == 0x40u8 && 0x45u8 & 0x80u8 != 0x80u8 && 0x45u8 & !(0x01u8 | 0x04u8 | 0x40u8 | 0x80u8) == 0) by (bit_vector);
     assert(0x85u8 & 0x01u8 == 0x01u8 && 0x85u8 & 0x04u8 == 0x04u8 && 0x85u8 & 0x40u8 != 0x40u8 && 0x85u8 & 0x80u8 == 0x80u8 && 0x85u8 & !(0x01u8 | 0x04u8 | 0x40u8 | 0x80u8) == 0) by (bit_vector);
     assert(0xC5u8 & 0x01u8 == 0x01u8 && 0xC5u8 & 0x04u8 == 0x04u8 && 0xC5u8 & 0x40u8 == 0x40u8 && 0xC5u8 & 0x80u8 == 0x80u8 && 0xC5u8 & !(0x01u8 | 0x04u8 | 0x40u8 | 0x80u8) == 0) by (bit_vector);
+    assert(0x04u8 & 0x01u8 != 0x01u8 && 0x04u8 & 0x04u8 == 0x04u8 && 0x04u8 & 0x40u8 != 0x40u8 && 0x04u8 & 0x80u8 != 0x80u8 && 0x04u8 & !(0x01u8 | 0x04u8 | 0x40u8 | 0x80u8) == 0) by (bit_vector);
+    assert(0x44u8 & 0x01u8 != 0x01u8 && 0x44u8 & 0x04u8 == 0x04u8 && 0x44u8 & 0x40u8 == 0x40u8 && 0x44u8 & 0x80u8 != 0x80u8 && 0x44u8 & !(0x01u8 | 0x04u8 | 0x40u8 | 0x80u8) == 0) by (bit_vector);
+    assert(0x84u8 & 0x01u8 != 0x01u8 && 0x84u8 & 0x04u8 == 0x04u8 && 0x84u8 & 0x40u8 != 0x40u8 && 0x84u8 & 0x80u8 == 0x80u8 && 0x84u8 & !(0x01u8 | 0x04u8 | 0x40u8 | 0x80u8) == 0) by (bit_vector);
+    assert(0xC4u8 & 0x01u8 != 0x01u8 && 0xC4u8 & 0x04u8 == 0x04u8 && 0xC4u8 & 0x40u8 == 0x40u8 && 0xC4u8 & 0x80u8 == 0x80u8 && 0xC4u8 & !(0x01u8 | 0x04u8 | 0x40u8 | 0x80u8) == 0) by (bit_vector);
     f
 }
 
@@ -132,6 +149,7 @@ pub fn uv_flags(_ev: &UvEvidence, attested: bool, extensions: bool) -> (f: u8)
 pub fn auth_data(
     rp_id_hash: &[u8; 32],
     ev: &UvEvidence,
+    presence: Presence,
     attested: Option<&[u8]>,
     extensions: Option<&[u8]>,
 ) -> Vec<u8> {
@@ -139,7 +157,12 @@ pub fn auth_data(
         37 + attested.map_or(0, <[u8]>::len) + extensions.map_or(0, <[u8]>::len),
     );
     out.extend_from_slice(rp_id_hash);
-    out.push(uv_flags(ev, attested.is_some(), extensions.is_some()));
+    out.push(uv_flags(
+        ev,
+        presence,
+        attested.is_some(),
+        extensions.is_some(),
+    ));
     out.extend_from_slice(&0u32.to_be_bytes());
     if let Some(data) = attested {
         out.extend_from_slice(data);
@@ -157,16 +180,18 @@ mod tests {
     #[test]
     fn auth_data_layout() {
         let ev = UvEvidence::from_fprintd_match(1000);
-        let ad = auth_data(&[7; 32], &ev, None, None);
+        let ad = auth_data(&[7; 32], &ev, Presence::Required, None, None);
         assert_eq!(ad.len(), 37);
         assert_eq!(&ad[..32], &[7; 32]);
         assert_eq!(ad[32], FLAG_UP | FLAG_UV);
         assert_eq!(&ad[33..], &[0, 0, 0, 0]);
-        let ad = auth_data(&[7; 32], &ev, Some(&[1, 2, 3]), None);
+        let ad = auth_data(&[7; 32], &ev, Presence::Required, Some(&[1, 2, 3]), None);
         assert_eq!(ad[32], FLAG_UP | FLAG_UV | FLAG_AT);
         assert_eq!(&ad[37..], &[1, 2, 3]);
-        let ad = auth_data(&[7; 32], &ev, None, Some(&[0xa0]));
+        let ad = auth_data(&[7; 32], &ev, Presence::Required, None, Some(&[0xa0]));
         assert_eq!(ad[32], FLAG_UP | FLAG_UV | FLAG_ED);
+        let ad = auth_data(&[7; 32], &ev, Presence::Silent, None, None);
+        assert_eq!(ad[32], FLAG_UV);
         assert_eq!(UvEvidence::from_token(5).method(), UvMethod::PinUvAuthToken);
         let polkit = UvEvidence::from_polkit_authorization(1000);
         assert_eq!(polkit.method(), UvMethod::Polkit);

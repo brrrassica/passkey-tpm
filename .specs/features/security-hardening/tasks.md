@@ -174,20 +174,21 @@ H20 [P]  H21 [P]  H22 [P]  H23 [P]  H24 (at each tag)
 **Tests**: integration-tpm + unit + bounded proof (wire)
 **Gate**: quick (+ kani for wire, slow tier)
 
-### H10a: Decide G2 (silent probe) — amend AD-012
+### H10a: Decide G2 (silent probe) — amend AD-012 ✅
 
 **What**: Record the decision in context.md and amend AD-012 in STATE.md.
 **Requirement**: HARD-07
 **Tests**: none
 
-### H10b: Silent probes don't reveal credential existence
+### H10b: Silent probes don't reveal credential existence ✅
 
 **What**: `up=false` without UV → `NO_CREDENTIALS` regardless; with a valid token → assertion with UP=0.
 **Where**: `crates/core/src/ctap2/get_assertion.rs` (~l.76–84)
 **Depends on**: H10a
 **Requirement**: HARD-07
 **Done when**:
-- [ ] Scenario tests for both branches; libfido2 VM check still passes
+- [x] Scenario tests for both branches
+- [x] libfido2 VM check still passes (VM e2e: 42 passed)
 **Tests**: unit + proof
 **Gate**: quick + proof
 

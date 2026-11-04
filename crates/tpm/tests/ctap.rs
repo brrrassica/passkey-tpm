@@ -2,7 +2,7 @@
 
 mod support;
 
-use passkey_tpm_core::ctap2::{cmd, status, Authenticator, Step, UserInfo, UvOutcome};
+use passkey_tpm_core::ctap2::{status, Authenticator, Command, Step, UserInfo, UvOutcome};
 use passkey_tpm_core::evidence::UvEvidence;
 use passkey_tpm_core::pin_protocol::{parse_platform_key, KeyAgreement, Protocol};
 use passkey_tpm_core::tpm_iface::Uid;
@@ -28,8 +28,8 @@ fn text(s: &str) -> Value {
     Value::Text(s.to_owned())
 }
 
-fn req(command: u8, params: Vec<(Value, Value)>) -> Vec<u8> {
-    let mut r = vec![command];
+fn req(command: Command, params: Vec<(Value, Value)>) -> Vec<u8> {
+    let mut r = vec![command.code()];
     r.extend_from_slice(&cbor::encode(&Value::Map(params)));
     r
 }
@@ -74,7 +74,7 @@ fn make_credential(a: &mut Authenticator<TpmBackend>, extensions: Option<Value>)
     if let Some(ext) = extensions {
         params.push((int(6), ext));
     }
-    let resp = body(&with_touch(a, &req(cmd::MAKE_CREDENTIAL, params)));
+    let resp = body(&with_touch(a, &req(Command::MakeCredential, params)));
     let auth = resp
         .map_get(&int(2))
         .and_then(Value::as_bytes)
@@ -90,7 +90,7 @@ fn hmac_secret_input(a: &mut Authenticator<TpmBackend>) -> Value {
         ALICE,
         ENROLLED,
         &req(
-            cmd::CLIENT_PIN,
+            Command::ClientPin,
             vec![
                 (int(1), Value::Uint(protocol.as_u64())),
                 (int(2), Value::Uint(2)),
@@ -125,7 +125,7 @@ fn hmac_secret_for_a_credential_without_it_is_omitted() {
 
     let hmac_in = hmac_secret_input(&mut a);
     let ga = req(
-        cmd::GET_ASSERTION,
+        Command::GetAssertion,
         vec![
             (int(1), text(RP)),
             (int(2), Value::Bytes(vec![8; 32])),

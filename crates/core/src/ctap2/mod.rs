@@ -10,7 +10,7 @@ mod make_credential;
 mod state;
 
 pub use authn::{Authenticator, Pending, Step, UserInfo, UvOutcome};
-pub use common::{cmd, status, AAGUID, ES256, MAX_MSG_SIZE};
+pub use common::{status, ClientPinSub, Command, CredMgmtSub, AAGUID, ES256, MAX_MSG_SIZE};
 pub use make_credential::APPLIED_CRED_PROTECT;
 
 #[cfg(test)]

@@ -20,9 +20,13 @@
 
 **Identification:** each agent's device carries `HID_PHYS=passkey-tpm-agent/uid=<uid>`, so tools and tests can tell users' devices apart.
 
-## G2, G3, G4
+## G2: silent probes (decided 2026-11-04, issue #5)
 
-Still open. They're needed for phase 2/3 (H10a, H16, H13). The recommendations in the spec stand.
+A silent (`up=false`) getAssertion without a pinUvAuthParam always gets `NO_CREDENTIALS`, before any credential lookup. With a valid token it gets a real assertion with UP=0 and UV=1, signed through the UV gate, and the token keeps its presence for the request that follows. Firefox (authenticator-rs `do_credential_list_filtering_ctap2`) filters allowList and excludeList this way with the PIN token, and drops every credential whose probe fails, so the old `UNSUPPORTED_OPTION` made allowList sign-in impossible.
+
+## G3, G4
+
+Still open. They're needed for phase 3 (H16, H13). The recommendations in the spec stand.
 
 ## Notes from the P1 implementation
 
