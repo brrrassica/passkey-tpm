@@ -1,24 +1,31 @@
+passkey-tpm (0.1.0~brrr2-1) unstable; urgency=medium
+
+  * Cherry-pick upstream Firefox allowList and stale-prompt fix.
+  * Restore empty allowList discoverability from the local patch series.
+
+  -- vpasskey-btw <vpasskey-btw@localhost>  Sat, 21 Nov 2026 00:00:00 +0000
+
 passkey-tpm (0.1.0~brrr1-1) unstable; urgency=medium
 
   * Fork release: retries, configurable UV timeout, prompt backends,
     getInfo advertisement audit, and the polkit fingerprint prompt.
 
- -- Sam Ralial <sam@alatcerdas.tech>  Mon, 02 Nov 2026 00:00:00 +0000
+  -- Sam Ralial <sam@alatcerdas.tech>  Mon, 02 Nov 2026 00:00:00 +0000
 
 passkey-tpm (0.1.0~beta.2-1) unstable; urgency=medium
 
   * Second beta: tray icon, PIN + presence for users without a fingerprint.
 
- -- Davi Henrique <dangerousplay715@gmail.com>  Tue, 13 Oct 2026 00:00:00 +0000
+  -- Davi Henrique <dangerousplay715@gmail.com>  Tue, 13 Oct 2026 00:00:00 +0000
 
 passkey-tpm (0.1.0~beta.1-1) unstable; urgency=medium
 
   * First beta.
 
- -- Davi Henrique <dangerousplay715@gmail.com>  Sun, 04 Oct 2026 00:00:00 +0000
+  -- Davi Henrique <dangerousplay715@gmail.com>  Sun, 04 Oct 2026 00:00:00 +0000
 
 passkey-tpm (0.1.0-1) unstable; urgency=medium
 
   * Initial release.
 
- -- Davi Henrique <dangerousplay715@gmail.com>  Sat, 03 Oct 2026 00:00:00 +0000
+  -- Davi Henrique <dangerousplay715@gmail.com>  Sat, 03 Oct 2026 00:00:00 +0000

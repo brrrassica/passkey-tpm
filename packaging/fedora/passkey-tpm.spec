@@ -1,8 +1,8 @@
-%global upstream_version 0.1.0-brrr1
+%global upstream_version 0.1.0-brrr2
 
 Name:           passkey-tpm
 # "~" sorts the pre-release before the final 0.1.0.
-Version:        0.1.0~brrr1
+Version:        0.1.0~brrr2
 Release:        1%{?dist}
 Summary:        TPM-backed passkeys (FIDO2/WebAuthn) for Linux
 License:        MIT OR Apache-2.0

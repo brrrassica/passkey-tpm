@@ -1,7 +1,7 @@
 # Maintainer: Davi Henrique <dangerousplay715@gmail.com>
 pkgname=passkey-tpm
-pkgver=0.1.0brrr1
-_tag=0.1.0-brrr1 # upstream version; pkgver drops the "-" Arch forbids
+pkgver=0.1.0brrr2
+_tag=0.1.0-brrr2 # upstream version; pkgver drops the "-" Arch forbids
 pkgrel=1
 pkgdesc="TPM-backed passkeys (FIDO2/WebAuthn) for Linux, unlocked with fingerprint or PIN"
 arch=('x86_64' 'aarch64')
