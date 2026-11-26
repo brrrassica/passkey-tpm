@@ -72,8 +72,8 @@ fn set_auth(ctx: &mut Context, nv: NvIndexHandle, auth: &[u8; 32]) -> Result<()>
     Ok(ctx.tr_set_auth(ObjectHandle::from(nv), Auth::try_from(auth.to_vec())?)?)
 }
 
-fn clear_auth(ctx: &mut Context, nv: NvIndexHandle) {
-    let _ = ctx.tr_set_auth(ObjectHandle::from(nv), Auth::default());
+fn clear_auth(ctx: &mut Context, nv: NvIndexHandle) -> Result<()> {
+    Ok(ctx.tr_set_auth(ObjectHandle::from(nv), Auth::default())?)
 }
 
 /// Defines a gate at `index` with `auth` and returns its Name.
@@ -137,8 +137,8 @@ pub fn satisfy(
             None,
         )?)
     });
-    clear_auth(ctx, nv);
-    result.map(|_| ())
+    let clear = clear_auth(ctx, nv);
+    result.and(clear).map(|_| ())
 }
 
 /// Checks `auth` against the gate with `PolicySecret` in a trial session. A wrong value is a
