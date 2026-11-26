@@ -196,14 +196,26 @@ impl<T: TpmOps> Authenticator<T> {
         }
         let left = retries.saturating_sub(1);
         self.tpm.set_pin_retries(uid, left).map_err(map_tpm_error)?;
-        let decrypted = shared
-            .decrypt(pin_hash_enc)
-            .map_err(|_| status::INVALID_PARAMETER)?;
-        let hash: Zeroizing<[u8; 16]> = decrypted
-            .as_slice()
-            .try_into()
-            .map(Zeroizing::new)
-            .map_err(|_| status::INVALID_PARAMETER)?;
+        // Decrypt and length-check the PIN hash before treating this as an attempt: a
+        // malformed pinHashEnc never reached the TPM, so the retry is given back (HARD-03),
+        // exactly like a TPM error below. Otherwise an unauthenticated caller could burn
+        // retries without any PIN comparison.
+        let restored =
+            |slf: &mut Self| slf.tpm.set_pin_retries(uid, retries).map_err(map_tpm_error);
+        let decrypted = match shared.decrypt(pin_hash_enc) {
+            Ok(d) => d,
+            Err(_) => {
+                restored(self)?;
+                return Err(status::INVALID_PARAMETER);
+            }
+        };
+        let hash: Zeroizing<[u8; 16]> = match decrypted.as_slice().try_into() {
+            Ok(h) => Zeroizing::new(h),
+            Err(_) => {
+                restored(self)?;
+                return Err(status::INVALID_PARAMETER);
+            }
+        };
         match self.tpm.verify_pin(uid, &hash) {
             Ok(()) => {
                 self.tpm

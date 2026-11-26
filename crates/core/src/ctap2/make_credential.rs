@@ -21,7 +21,7 @@ pub const APPLIED_CRED_PROTECT: CredProtect = CredProtect::UvRequired;
 pub struct Request {
     rp_id: String,
     rp_name: String,
-    rp_id_hash: RpIdHash,
+    pub(super) rp_id_hash: RpIdHash,
     client_data_hash: [u8; 32],
     user_id: Vec<u8>,
     user_name: String,

@@ -13,6 +13,7 @@ use super::common::{error, status, Parsed};
 use super::state::{HmacRequest, UserState};
 use crate::evidence::UvEvidence;
 use crate::pin_protocol::{self, Protocol};
+use crate::token::{PERM_GA, PERM_MC};
 use crate::tpm_iface::{RpIdHash, TpmOps, Uid};
 
 /// Per-request facts the core can't discover itself.
@@ -68,6 +69,26 @@ impl Pending {
     }
 }
 
+impl PendingKind {
+    /// The pinUvAuth permission this pending operation needs, if any.
+    pub(super) fn perm(&self) -> u8 {
+        match self {
+            PendingKind::MakeCredential(_) => PERM_MC,
+            PendingKind::GetAssertion(_) => PERM_GA,
+            _ => 0,
+        }
+    }
+
+    /// The relying party this pending operation is bound to, if any.
+    pub(super) fn rp_id_hash(&self) -> Option<&RpIdHash> {
+        match self {
+            PendingKind::MakeCredential(req) => Some(&req.rp_id_hash),
+            PendingKind::GetAssertion(req) => Some(&req.rp_id_hash),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum PendingKind {
     MakeCredential(super::make_credential::Request),
@@ -77,6 +98,16 @@ pub(super) enum PendingKind {
     TokenUsingUv(super::client_pin::TokenRequest),
     Reset,
     Selection,
+}
+
+impl PendingKind {
+    /// Whether this kind needs a pinUvAuthToken-verified operation permission.
+    fn needs_token(&self) -> bool {
+        matches!(
+            self,
+            PendingKind::MakeCredential(_) | PendingKind::GetAssertion(_)
+        )
+    }
 }
 
 /// The CTAP2 authenticator logic over a TPM backend.
@@ -123,6 +154,34 @@ impl<T: TpmOps> Authenticator<T> {
         self.users.entry(uid.0).or_default()
     }
 
+    /// Revalidates a presence-only operation's UV provenance before completion: the token
+    /// verified at prepare time must still exist, still be user-verified, still carry the
+    /// operation's permission, and still permit this relying party (UV #2, HARD-12).
+    /// A PIN change or reset invalidates the token while the gesture is pending, and the
+    /// pending operation must not revive it.
+    fn token_still_allows(
+        &mut self,
+        uid: Uid,
+        perm: u8,
+        rp: Option<&RpIdHash>,
+        now_ms: u64,
+    ) -> Parsed<()> {
+        let grant = self
+            .user(uid)
+            .token
+            .as_ref()
+            .map(|issued| &issued.token.grant)
+            .ok_or(status::PIN_AUTH_INVALID)?;
+        if !grant.user_verified() {
+            return Err(status::PIN_AUTH_INVALID);
+        }
+        let rp = rp.ok_or(status::PIN_AUTH_INVALID)?;
+        if !grant.allows(perm, &rp.0, now_ms) {
+            return Err(status::PIN_AUTH_INVALID);
+        }
+        Ok(())
+    }
+
     /// Phase 1. `now_ms` is a monotonic clock in milliseconds.
     pub fn prepare(&mut self, uid: Uid, user: UserInfo, request: &[u8], now_ms: u64) -> Step {
         use super::common::cmd;
@@ -146,10 +205,16 @@ impl<T: TpmOps> Authenticator<T> {
             cmd::CREDENTIAL_MANAGEMENT | cmd::CREDENTIAL_MANAGEMENT_PREVIEW => self
                 .credential_management(uid, params, now_ms)
                 .map(Step::Done),
-            cmd::RESET => Self::need_gesture(uid, user, "reset passkey-tpm", PendingKind::Reset),
-            cmd::SELECTION => {
-                Self::need_gesture(uid, user, "select passkey-tpm", PendingKind::Selection)
+            cmd::RESET => {
+                self.need_gesture(uid, user, "reset passkey-tpm", PendingKind::Reset, now_ms)
             }
+            cmd::SELECTION => self.need_gesture(
+                uid,
+                user,
+                "select passkey-tpm",
+                PendingKind::Selection,
+                now_ms,
+            ),
             _ => Err(status::INVALID_COMMAND),
         };
         result.unwrap_or_else(|code| Step::Done(error(code)))
@@ -165,6 +230,22 @@ impl<T: TpmOps> Authenticator<T> {
             }
             UvOutcome::Matched(_) => return error(status::OPERATION_DENIED),
             // Presence never stands in for a fingerprint the request asked for.
+            UvOutcome::Present if pending.presence_only && pending.kind.needs_token() => {
+                // AD-022: a presence-only makeCredential/getAssertion got UV from a
+                // userVerified pinUvAuthToken. The token must still exist, still be
+                // userVerified, and still permit this RP: a PIN change or reset invalidates
+                // it while the gesture is pending, so completion never revives dead UV
+                // (UV #2, HARD-12).
+                match self.token_still_allows(
+                    uid,
+                    pending.kind.perm(),
+                    pending.kind.rp_id_hash(),
+                    now_ms,
+                ) {
+                    Ok(()) => None,
+                    Err(code) => return error(code),
+                }
+            }
             UvOutcome::Present if pending.presence_only => None,
             UvOutcome::Present | UvOutcome::Denied => return error(status::OPERATION_DENIED),
             UvOutcome::NoMatch => {
@@ -210,8 +291,15 @@ impl<T: TpmOps> Authenticator<T> {
 
     /// Reset and selection only need presence: a fingerprint touch, or a presence
     /// confirmation for users without an enrolled fingerprint (AD-022).
-    fn need_gesture(uid: Uid, user: UserInfo, prompt: &str, kind: PendingKind) -> Parsed<Step> {
-        let pending = |presence_only| {
+    fn need_gesture(
+        &mut self,
+        uid: Uid,
+        user: UserInfo,
+        prompt: &str,
+        kind: PendingKind,
+        now_ms: u64,
+    ) -> Parsed<Step> {
+        let pending = |presence_only: bool, kind: PendingKind| {
             Box::new(Pending {
                 uid,
                 rp_id: prompt.to_owned(),
@@ -220,9 +308,24 @@ impl<T: TpmOps> Authenticator<T> {
             })
         };
         Ok(if user.uv_enrolled {
-            Step::NeedUv(pending(false))
+            Step::NeedUv(pending(false, kind))
+        } else if kind.needs_token() {
+            // Presence-only MC/GA rely on a userVerified token for UV (AD-022); the token
+            // must still be valid at completion (UV #2), so without one the request fails
+            // up front instead of prompting and then being unable to complete.
+            let ok = match (kind.rp_id_hash(), self.user(uid).token.as_ref()) {
+                (Some(rp), Some(issued)) => {
+                    issued.token.grant.user_verified()
+                        && issued.token.grant.allows(kind.perm(), &rp.0, now_ms)
+                }
+                _ => false,
+            };
+            if !ok {
+                return Err(status::PIN_AUTH_INVALID);
+            }
+            Step::NeedPresence(pending(true, kind))
         } else {
-            Step::NeedPresence(pending(true))
+            Step::NeedPresence(pending(true, kind))
         })
     }
 

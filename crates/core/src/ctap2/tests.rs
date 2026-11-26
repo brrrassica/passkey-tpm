@@ -787,6 +787,100 @@ fn without_fingerprint_pin_and_presence_register_and_sign() {
 }
 
 #[test]
+fn presence_only_completion_revalidates_the_token() {
+    // HARD-12: UV evidence comes from the token verified at prepare time. If it is
+    // invalidated while the gesture is pending (PIN change, reset), completion must not
+    // revive it.
+    for invalidate in [invalidate_by_change_pin as fn(&mut A), invalidate_by_reset] {
+        for request_of in [request_mc, request_ga] {
+            let mut a = auth();
+            let request = request_of(&mut a);
+            let pending = need_presence(a.prepare(ALICE, NO_READER, &request, 1_000));
+            invalidate(&mut a);
+            assert_eq!(
+                a.complete(pending, UvOutcome::Present, 1_000),
+                vec![status::PIN_AUTH_INVALID],
+                "an invalidated token must not complete a presence-only request with UV"
+            );
+            assert!(a.tpm_mut().signed.is_empty());
+        }
+    }
+}
+
+/// A presence-only makeCredential after a PIN token verified it (the token carries UV but
+/// its presence was consumed at prepare).
+fn request_mc(a: &mut A) -> Vec<u8> {
+    let (p, token) = pin_token(a);
+    mc_with(&p, &token)
+}
+
+/// A presence-only getAssertion after a PIN token verified it.
+fn request_ga(a: &mut A) -> Vec<u8> {
+    let (p, token) = pin_token(a);
+    ga_with(&p, &token, vec![])
+}
+
+fn invalidate_by_change_pin(a: &mut A) {
+    let p = Platform::new(a, ALICE, Protocol::Two);
+    let _ = done(prep(a, ALICE, &p.change_pin(PIN, b"654321")));
+}
+
+fn invalidate_by_reset(a: &mut A) {
+    let reset = need_presence(a.prepare(ALICE, NO_READER, &req(cmd::RESET, vec![]), 1_000));
+    assert_eq!(
+        a.complete(reset, UvOutcome::Present, 1_000),
+        vec![status::OK]
+    );
+}
+
+#[test]
+fn malformed_pin_hash_enc_keeps_the_retry() {
+    // HARD-03: a pinHashEnc the core cannot even decrypt or parse never reached the TPM,
+    // so it must not burn a retry (an unauthenticated caller could otherwise force
+    // PIN_BLOCKED without any PIN comparison).
+    for bad in [
+        Vec::new(),
+        vec![0u8; 15],
+        // IV only: the ciphertext is empty.
+        vec![0u8; 16],
+        // Not a multiple of 16 after the IV.
+        vec![0u8; 17],
+    ] {
+        let mut a = auth();
+        set_pin(&mut a, ALICE, Protocol::Two);
+        a.tpm_mut().retries.insert(ALICE.0, 3);
+        let p = Platform::new(&mut a, ALICE, Protocol::Two);
+        let mut m = p.base(9);
+        m.push((int(6), Value::Bytes(bad)));
+        m.push((int(9), Value::Uint(0x03)));
+        m.push((int(10), text(RP)));
+        assert_eq!(
+            done(prep(&mut a, ALICE, &req(cmd::CLIENT_PIN, m)))[0],
+            status::INVALID_PARAMETER
+        );
+        assert_eq!(
+            a.tpm_mut().retries[&ALICE.0],
+            3,
+            "no TPM comparison, no retry burnt"
+        );
+    }
+
+    // A wrong PIN that does decrypt still costs a retry.
+    let mut a = auth();
+    set_pin(&mut a, ALICE, Protocol::Two);
+    let p = Platform::new(&mut a, ALICE, Protocol::Two);
+    assert_eq!(
+        done(prep(
+            &mut a,
+            ALICE,
+            &p.token_using_pin(b"000000", 0x03, Some(RP))
+        ))[0],
+        status::PIN_INVALID
+    );
+    assert_eq!(a.tpm_mut().retries[&ALICE.0], 7);
+}
+
+#[test]
 fn without_fingerprint_refused_presence_signs_nothing() {
     for (outcome, code) in [
         (UvOutcome::Denied, status::OPERATION_DENIED),
