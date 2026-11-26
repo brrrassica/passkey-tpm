@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 /// A validated getAssertion request.
 #[derive(Debug)]
 pub struct Request {
-    rp_id_hash: RpIdHash,
+    pub(super) rp_id_hash: RpIdHash,
     client_data_hash: [u8; 32],
     found: Vec<Found>,
     discoverable: bool,
